@@ -56,6 +56,7 @@ CrossOver 26.3, with a few patches of its own (`engine/patches/`):
 | `02-browser-arguments` | Adds the browser options that make the UIs of Steam and the other launchers render under Wine |
 | `03-fps-limiter` | Per-game frame limiter for every D3DMetal game |
 | `04-child-windows-over-opengl` | Shows child windows (for example the browser with the EA app's sign-in page) above windows drawn with OpenGL/Metal, as on Windows (EA app only) |
+| `05-optional-unwind-outputs` | Lets games pass empty output pointers to the stack unwinder, as Windows does (prevents a crash at startup) |
 
 Everything else lives in the `varco` command-line tool (`cli/varco`), which the app calls.
 

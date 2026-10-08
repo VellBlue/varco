@@ -1,5 +1,8 @@
 /* Varco helper: runs in the bottle alongside Steam.
- * When a game window appears, it minimizes Steam's main window. */
+ * When a game window appears, it minimizes Steam's main window. It also confirms the "graphics driver too old"
+ * warnings that games show at startup (D3DMetal reports a GPU with a driver version they don't know): the game
+ * waits for OK and then runs normally. Only message boxes of games that talk about the driver and offer nothing
+ * but OK are confirmed: the helper never answers a question for the user. */
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wchar.h>
@@ -46,6 +49,36 @@ static BOOL CALLBACK find_game(HWND h, LPARAM l)
     game_found = TRUE; return FALSE;
 }
 
+/* "driver" in the languages games use for these warnings (compared in lowercase) */
+static const WCHAR *driver_words[] = { L"driver", L"treiber", L"pilote", L"controlador", L"sterownik",
+    L"\x0434\x0440\x0430\x0439\x0432\x0435\x0440" /* драйвер */, L"\x30c9\x30e9\x30a4\x30d0" /* ドライバ */,
+    L"\x9a71\x52a8" /* 驱动 */, L"\x9a45\x52d5" /* 驅動 */, L"\xb4dc\xb77c\xc774\xbc84" /* 드라이버 */ };
+
+static BOOL CALLBACK confirm_warning(HWND h, LPARAM l)
+{
+    DWORD pid; WCHAR name[128], cls[16], text[2048];
+    if (!IsWindowVisible(h)) return TRUE;
+    GetClassNameW(h, cls, 16);
+    if (wcscmp(cls, L"#32770")) return TRUE;   /* standard message box */
+    GetWindowThreadProcessId(h, &pid);
+    if (!exe_name(pid, name, 128) || is_ignored(name)) return TRUE;
+    if (!wcscmp(name, L"rdr2.exe") && GetDlgItem(h, IDOK))   /* its warning, known: confirmed as it is */
+    {
+        PostMessageW(h, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), (LPARAM)GetDlgItem(h, IDOK));
+        return TRUE;
+    }
+    if (!GetDlgItem(h, IDOK) || GetDlgItem(h, IDCANCEL) || GetDlgItem(h, IDNO)) return TRUE;   /* only plain warnings */
+    if (!GetDlgItemTextW(h, 0xffff, text, 2048)) return TRUE;   /* the message box's text */
+    CharLowerW(text);
+    for (unsigned i = 0; i < sizeof(driver_words) / sizeof(driver_words[0]); i++)
+        if (wcsstr(text, driver_words[i]))
+        {
+            PostMessageW(h, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), (LPARAM)GetDlgItem(h, IDOK));
+            break;
+        }
+    return TRUE;
+}
+
 static BOOL CALLBACK minimize_steam(HWND h, LPARAM l)
 {
     DWORD pid; WCHAR name[128], cls[64];
@@ -66,6 +99,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
         Sleep(1500);
         if (!steam_running()) { if (++idle > 40) break; continue; }   /* quits ~1 minute after Steam closes */
         idle = 0;
+        EnumWindows(confirm_warning, 0);
         game_found = FALSE; EnumWindows(find_game, 0);
         if (game_found && !was_playing) { Sleep(1500); EnumWindows(minimize_steam, 0); }
         was_playing = game_found;

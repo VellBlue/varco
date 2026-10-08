@@ -7,7 +7,7 @@
 set -e
 SRC="${1:-$HOME/Varco/engines/cx26}"
 OUT="${2:-$HOME/Developer/varco-release}"
-VER="${3:-26.3-1}"
+VER="${3:-26.3-2}"
 REPO="${0:A:h:h}"
 WINE_SRC="${WINE_SRC:-$HOME/Varco/build/sources/wine}"
 
@@ -24,6 +24,9 @@ for f in "$stage"/cx26/bin/*(N.) "$stage"/cx26/lib/wine/x86_64-unix/*.so(N); do
     install_name_tool -delete_rpath "$p" "$f" 2>/dev/null || true
   done
 done
+
+echo "Replacing build paths with neutral text of the same length..."
+python3 -I "$REPO/engine/scrub-paths.py" "$stage/cx26"
 
 echo "Licenses and notices..."
 mkdir -p "$stage/cx26/licenses"

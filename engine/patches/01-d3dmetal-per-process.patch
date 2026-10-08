@@ -58,12 +58,31 @@
  static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name, void **module,
                                    SIZE_T *size_ptr, SECTION_IMAGE_INFORMATION *image_info,
                                    ULONG_PTR limit_low, ULONG_PTR limit_high, USHORT search_machine,
-@@ -1592,6 +1643,26 @@
+@@ -1512,6 +1563,7 @@
+     const char *pe_dir = get_pe_dir( search_machine );
+     const char *so_dir = get_so_dir( current_machine );
+     const char *pe_build_dir = build_dir;
++    const char *d3dm_dir = getenv( "VARCO_D3DMETAL_DIR" );
+     OBJECT_ATTRIBUTES attr;
+     NTSTATUS status = STATUS_DLL_NOT_FOUND;
+     BOOL found_image = FALSE;
+@@ -1543,7 +1595,10 @@
+             pe_build_dir = alt_build_dir;
+         maxlen = max( strlen(build_dir), strlen(pe_build_dir) ) + sizeof("/programs/") + len;
+     }
+-    maxlen = max( maxlen, dll_path_maxlen + 1 ) + len + sizeof("/aarch64-windows") + sizeof(".so");
++    maxlen = max( maxlen, dll_path_maxlen + 1 );
++    /* VARCO: the D3DMetal folder is put in front of the name too (see below): make room for it */
++    if (d3dm_dir && *d3dm_dir) maxlen = max( maxlen, strlen(d3dm_dir) + 1 );
++    maxlen += len + sizeof("/aarch64-windows") + sizeof(".so");
+ 
+     if (!(file = malloc( maxlen ))) return STATUS_NO_MEMORY;
+ 
+@@ -1592,6 +1647,25 @@
          if (status != STATUS_DLL_NOT_FOUND) goto done;
      }
  
 +    {
-+        const char *d3dm_dir = getenv( "VARCO_D3DMETAL_DIR" );
 +        if (d3dm_dir && *d3dm_dir && varco_is_gfx_dll( file + pos + 1 ) && !varco_process_excluded())
 +        {
 +            ptr = file + pos;

@@ -1,0 +1,25 @@
+--- a/dlls/ntdll/unwind.c
++++ b/dlls/ntdll/unwind.c
+@@ -2045,6 +2045,9 @@
+     struct UNWIND_INFO *info;
+     unsigned int i, prolog_offset;
+     BOOL mach_frame = FALSE, chained = FALSE;
++    PEXCEPTION_ROUTINE dummy_handler;  /* VARCO: see below */
++    void *dummy_data;
++    ULONG_PTR dummy_frame;
+ 
+ #ifdef __arm64ec__
+     if (RtlIsEcCode( pc ))
+@@ -2063,6 +2066,12 @@
+     }
+ #endif
+ 
++    /* VARCO: on Windows the output pointers are optional (some games, e.g. Red Dead Redemption 2, pass NULL for
++     * HandlerRoutine); writing through NULL here crashed the unwinder and left the game hanging at startup. */
++    if (!handler_ret) handler_ret = &dummy_handler;
++    if (!data) data = &dummy_data;
++    if (!frame_ret) frame_ret = &dummy_frame;
++
+     TRACE( "type %lx base %I64x rip %I64x rva %I64x rsp %I64x\n", type, base, pc, pc - base, context->Rsp );
+     if (limit_low || limit_high) FIXME( "limits not supported\n" );
+ 
