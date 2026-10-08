@@ -427,11 +427,11 @@ case "$cmd" in
     id="$1"; shift
     set_pad_mode "$(vtool pad "$BOTTLE" "$id" 2>/dev/null || echo ps)"
     vtool fps "$BOTTLE" --write-conf 2>/dev/null || true
-    # RDR2: always true fullscreen (in "borderless" it stays in a window smaller than the screen
-    # and the FPS limit, which uses the screen's refresh rate, doesn't work)
+    # RDR2: always borderless fullscreen. In true fullscreen it switches the Mac's display to its own resolution
+    # (often a non-Retina one) and its window keeps the old size, covering only part of the screen.
     if [[ "$id" == 1174180 ]] && ! ps -ax -o command | grep -qi '[\\/]rdr2\.exe'; then
       for f in "$BOTTLE"/drive_c/users/*/Documents/Rockstar\ Games/Red\ Dead\ Redemption\ 2/Settings/system.xml(N); do
-        sed -i '' -E 's/(<windowed value=")[0-9]+(")/\10\2/' "$f"
+        sed -i '' -E 's/(<windowed value=")[0-9]+(")/\12\2/' "$f"
       done
     fi
     launch 'C:\Program Files (x86)\Steam\steam.exe' ${(z)STEAM_FLAGS} -applaunch "$id" "$@"
