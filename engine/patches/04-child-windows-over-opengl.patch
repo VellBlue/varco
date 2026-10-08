@@ -1,0 +1,310 @@
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1189,7 +1189,91 @@
+     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
+     release_win_data(data);
+ }
++
++/* VARCO: a window that draws with OpenGL/Metal (for example the EA app's Qt window) has its view above the
++ * window's content, and covers the GDI-drawn child windows it contains (there, the CEF browser with the sign-in
++ * page). On Windows the child windows stay on top; winex11 draws offscreen for this. Here the rectangles of the
++ * visible child windows are passed to Cocoa, which redraws them above the surface with the window's content;
++ * Cocoa shows them only if the window really has an OpenGL/Metal surface. Top-level windows only.
++ * Called only from WindowPosChanged: during present() win32u holds the surfaces lock, and querying windows from
++ * win32u there can hang the process. Active only in the programs listed in VARCO_CHILD_OVERLAY ("eadesktop.exe,other.exe"):
++ * in all others, games included, it does nothing (with RDR2 even just querying win32u while switching to fullscreen
++ * made it crash). */
++static BOOL child_overlay_enabled(void)
++{
++    static int enabled = -1;
++    RTL_USER_PROCESS_PARAMETERS *params;
++    const char *list, *p;
++    const WCHAR *path, *base;
++    char exe[64];
++    unsigned int i, len;
+ 
++    if (enabled >= 0) return enabled;
++    enabled = 0;
++    if (!(list = getenv("VARCO_CHILD_OVERLAY")) || !*list) return enabled;
++    if (!(params = NtCurrentTeb()->Peb->ProcessParameters) || !params->ImagePathName.Buffer) return enabled;
++    path = base = params->ImagePathName.Buffer;
++    len = params->ImagePathName.Length / sizeof(WCHAR);
++    for (i = 0; i < len; i++) if (path[i] == '\\' || path[i] == '/') base = path + i + 1;
++    len -= base - path;
++    if (!len || len >= sizeof(exe)) return enabled;
++    for (i = 0; i < len; i++)
++    {
++        if (base[i] > 127) return enabled;
++        exe[i] = (base[i] >= 'A' && base[i] <= 'Z') ? base[i] + 'a' - 'A' : base[i];
++    }
++    exe[len] = 0;
++    for (p = list; *p; )
++    {
++        const char *end = strchr(p, ',');
++        size_t n = end ? (size_t)(end - p) : strlen(p);
++        if (n == len && !strncmp(p, exe, n)) { enabled = 1; break; }
++        if (!end) break;
++        p = end + 1;
++    }
++    return enabled;
++}
++
++static void update_child_overlays(HWND hwnd)
++{
++    UINT dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
++    struct macdrv_win_data *data;
++    CGRect rects[8];
++    int count = 0, i;
++    HWND child;
++
++    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child && count < ARRAY_SIZE(rects);
++         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
++    {
++        BOOL own_surface = FALSE;
++        RECT r;
++
++        if (!(NtUserGetWindowLongW(child, GWL_STYLE) & WS_VISIBLE)) continue;
++        /* a child window with its own OpenGL/Metal surface already has its view */
++        if ((data = get_win_data(child)))
++        {
++            own_surface = data->client_view != NULL;
++            release_win_data(data);
++        }
++        if (own_surface || !NtUserGetWindowRect(child, &r, dpi)) continue;
++        NtUserMapWindowPoints(0, hwnd, (POINT *)&r, 2, dpi);
++        if (r.right <= r.left || r.bottom <= r.top) continue;
++        rects[count++] = cgrect_from_rect(r);
++    }
++
++    if (!(data = get_win_data(hwnd))) return;
++    for (i = 0; i < count; i++)
++        rects[i] = CGRectOffset(rects[i], data->rects.client.left - data->rects.visible.left,
++                                data->rects.client.top - data->rects.visible.top);
++    /* no state is kept in macdrv_win_data: its layout stays exactly as in the original driver */
++    if (data->cocoa_window)
++    {
++        TRACE("%p: %d child windows above the surface\n", hwnd, count);
++        macdrv_set_window_child_overlays(data->cocoa_window, rects, count);
++    }
++    release_win_data(data);
++}
++
+ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc)
+ {
+     struct macdrv_client_surface *surface = impl_from_client_surface(client);
+@@ -1681,6 +1765,13 @@
+     struct macdrv_win_data *data;
+     unsigned int new_style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+     struct window_rects old_rects;
++    HWND parent;
++
++    /* VARCO: a child window appears, disappears or moves: update what must be redrawn above the main window's
++     * surface (the app might not present any more frames) */
++    if (child_overlay_enabled() && (parent = NtUserGetAncestor(hwnd, GA_PARENT)) &&
++        parent == NtUserGetAncestor(hwnd, GA_ROOT) && parent != hwnd)
++        update_child_overlays(parent);
+ 
+     if (!(data = get_win_data(hwnd))) return;
+ 
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -560,6 +560,8 @@
+ extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
+ /* VARCO: per-game FPS limit (0 = no limit), see d3dmetal.c */
+ extern int varco_fps_limit(void);
++/* VARCO: GDI child windows to redraw above the window's OpenGL/Metal surface (see window.c) */
++extern void macdrv_set_window_child_overlays(macdrv_window w, const CGRect *rects, int count);
+ extern void macdrv_view_release_metal_view(macdrv_metal_view v);
+ extern bool macdrv_get_view_backing_size(macdrv_view v, int backing_size[2]);
+ extern void macdrv_set_view_backing_size(macdrv_view v, const int backing_size[2]);
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -24,6 +24,7 @@
+ #import <CoreVideo/CoreVideo.h>
+ #import <Metal/Metal.h>
+ #import <QuartzCore/QuartzCore.h>
++#import <objc/runtime.h>
+ #include <dlfcn.h>
+ 
+ #import "cocoa_window.h"
+@@ -353,10 +354,28 @@
+ }
+ 
+     - (id) initWithFrame:(NSRect)frame device:(id<MTLDevice>)device;
++
++@end
++
+ 
++/* VARCO: view above the OpenGL/Metal surface that shows a child window's content (see window.c);
++ * it receives no clicks, which go to the window below */
++@interface WineChildOverlayView : NSView
+ @end
+ 
++@implementation WineChildOverlayView
++    - (BOOL) isFlipped { return YES; }
++    - (NSView*) hitTest:(NSPoint)point { return nil; }
++    - (BOOL) wantsUpdateLayer { return YES; }
++    - (void) updateLayer { }
++@end
+ 
++/* VARCO: YES once a window of this process has child overlays (only in the programs listed in VARCO_CHILD_OVERLAY,
++ * see window.c): until then, the overlay hooks do nothing at all. Read and written on the main thread. The overlay
++ * list hangs off the content view as an associated object, so WineContentView keeps its original layout. */
++static BOOL child_overlays_used;
++static char child_overlays_key;
++
+ @interface WineContentView : WineBaseView <NSTextInputClient, NSViewLayerContentScaleDelegate>
+ {
+     CGRect surfaceRect;
+@@ -543,6 +562,7 @@
+             layer.position = surfaceRect.origin;
+             layer.contents = (id)image;
+             CFRelease(image);
++            if (child_overlays_used && [[self childOverlays] count]) [self updateChildOverlays];
+             [window windowDidDrawContent];
+ 
+             // If the window may be transparent, then we have to invalidate the
+@@ -553,9 +573,92 @@
+                 window.shapeChangedSinceLastDraw = FALSE;
+                 [window invalidateShadow];
+             }
++        }
++    }
++
++    /* VARCO: child windows redrawn above the OpenGL/Metal surface (rectangles in the view's coordinates) */
++    - (NSMutableArray*) childOverlays
++    {
++        return objc_getAssociatedObject(self, &child_overlays_key);
++    }
++
++    - (void) setChildOverlayRects:(NSArray*)rects
++    {
++        NSMutableArray* childOverlays = [self childOverlays];
++        NSUInteger i;
++
++        if (!childOverlays)
++        {
++            childOverlays = [NSMutableArray array];
++            objc_setAssociatedObject(self, &child_overlays_key, childOverlays, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+         }
++        while ([childOverlays count] > [rects count])
++        {
++            [[childOverlays lastObject] removeFromSuperview];
++            [childOverlays removeLastObject];
++        }
++        while ([childOverlays count] < [rects count])
++        {
++            WineChildOverlayView* view = [[WineChildOverlayView alloc] initWithFrame:NSZeroRect];
++            [view setWantsLayer:YES];
++            view.layer.contentsGravity = kCAGravityResize;
++            [childOverlays addObject:view];
++            [view release];
++        }
++        for (i = 0; i < [rects count]; i++)
++        {
++            WineChildOverlayView* view = [childOverlays objectAtIndex:i];
++            [view setFrame:[[rects objectAtIndex:i] rectValue]];
++            [self addSubview:view positioned:NSWindowAbove relativeTo:nil];   /* above all other views */
++        }
++        [self updateChildOverlays];
+     }
+ 
++    /* the child windows are needed only if there is a visible OpenGL/Metal view to cover; that view may have been
++     * re-attached above, and then the child windows go back on top */
++    - (BOOL) raiseChildOverlays
++    {
++        NSMutableArray* childOverlays = [self childOverlays];
++        BOOL needed = NO;
++
++        if (![childOverlays count]) return NO;
++        for (NSView* subview in [self subviews])
++        {
++            if (![subview isKindOfClass:[WineChildOverlayView class]] && ![subview isHidden])
++            {
++                needed = YES;
++                break;
++            }
++        }
++        for (WineChildOverlayView* view in childOverlays)
++            [view setHidden:!needed];
++        if (needed && [[self subviews] lastObject] != [childOverlays lastObject])
++        {
++            for (WineChildOverlayView* view in childOverlays)
++                [self addSubview:view positioned:NSWindowAbove relativeTo:nil];
++        }
++        return needed;
++    }
++
++    - (void) updateChildOverlays
++    {
++        CGFloat scale = self.layer.contentsScale;
++
++        if (![self raiseChildOverlays]) return;
++
++        for (WineChildOverlayView* view in [self childOverlays])
++        {
++            NSRect frame = [view frame];
++            CGRect pixels = CGRectMake((frame.origin.x - surfaceRect.origin.x) * scale, (frame.origin.y - surfaceRect.origin.y) * scale,
++                                       frame.size.width * scale, frame.size.height * scale);
++            CGImageRef image = colorImage ? CGImageCreateWithImageInRect(colorImage, pixels) : NULL;
++
++            view.layer.contentsScale = scale;
++            view.layer.contents = (id)image;
++            if (image) CGImageRelease(image);
++        }
++    }
++
+     - (void) setSurfaceRect:(CGRect)rect
+     {
+         surfaceRect = rect;
+@@ -3910,6 +4013,32 @@
+             [view wine_setBackingSize:(int[2]){ 0 }];
+             [(WineWindow*)[view window] updateForGLSubviews];
+         }
++    });
++}
++}
++
++/***********************************************************************
++ *              macdrv_set_window_child_overlays
++ *
++ * VARCO: rectangles (Wine coordinates, relative to the window's content) of the child windows to redraw
++ * above the OpenGL/Metal surface.
++ */
++void macdrv_set_window_child_overlays(macdrv_window w, const CGRect *rects, int count)
++{
++@autoreleasepool
++{
++    WineWindow* window = (WineWindow*)w;
++    NSMutableArray* frames = [NSMutableArray arrayWithCapacity:count];
++    int i;
++
++    for (i = 0; i < count; i++)
++        [frames addObject:[NSValue valueWithRect:NSRectFromCGRect(cgrect_mac_from_win(rects[i]))]];
++
++    OnMainThreadAsync(^{
++        WineContentView* view = (WineContentView*)[window contentView];
++        child_overlays_used = YES;
++        if ([view isKindOfClass:[WineContentView class]])
++            [view setChildOverlayRects:frames];
+     });
+ }
+ }
+@@ -3955,6 +4084,8 @@
+             [superview addSubview:view positioned:NSWindowBelow relativeTo:prev];
+         else
+             [superview addSubview:view positioned:NSWindowAbove relativeTo:next];
++        if (child_overlays_used && [superview isKindOfClass:[WineContentView class]])
++            [superview updateChildOverlays];   /* VARCO */
+ 
+         if (oldWindow != newWindow)
+         {
+@@ -3977,6 +4108,8 @@
+     OnMainThreadAsync(^{
+         [view setHidden:hidden];
+         [(WineWindow*)view.window updateForGLSubviews];
++        if (child_overlays_used && [[view superview] isKindOfClass:[WineContentView class]])   /* VARCO: see raiseChildOverlays */
++            [(WineContentView*)[view superview] updateChildOverlays];
+     });
+ }
+ }

@@ -1,0 +1,113 @@
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -2002,6 +2002,73 @@
+ /*************************************************************************
+  *		init_startup_info
+  */
++/* VARCO: appends arguments to the command line
++ * of the CEF browsers embedded in launchers:
++ *   steamwebhelper.exe   <- $VARCO_WEBHELPER_ARGS    (e.g. " --no-sandbox --in-process-gpu --disable-gpu")
++ *   socialclubhelper.exe <- $VARCO_SOCIALCLUB_ARGS   (e.g. " --use-gl=swiftshader --in-process-gpu")
++ * and, for any other program, $VARCO_APPEND_ARGS = "name.exe= --option1 --option2;other.exe= --option" */
++static const char *varco_extra_args( const UNICODE_STRING *image )
++{
++    static const struct { const char *exe; const char *var; } rules[] =
++    {
++        { "steamwebhelper.exe", "VARCO_WEBHELPER_ARGS" },
++        { "socialclubhelper.exe", "VARCO_SOCIALCLUB_ARGS" },
++    };
++    const WCHAR *base = image->Buffer, *p;
++    const char *list;
++    unsigned int len, i, r;
++
++    if (!image->Buffer) return NULL;
++    for (p = image->Buffer; p < image->Buffer + image->Length / sizeof(WCHAR); p++)
++        if (*p == '\\' || *p == '/') base = p + 1;
++    len = image->Buffer + image->Length / sizeof(WCHAR) - base;
++    for (r = 0; r < ARRAY_SIZE(rules); r++)
++    {
++        const char *args;
++        if (len != strlen( rules[r].exe )) continue;
++        for (i = 0; i < len; i++)
++        {
++            WCHAR c = base[i];
++            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++            if (c != (unsigned char)rules[r].exe[i]) break;
++        }
++        if (i < len) continue;
++        args = getenv( rules[r].var );
++        return (args && *args) ? args : NULL;
++    }
++    /* generic rules: the name (lowercase) is compared with the part before "=" of each entry */
++    if ((list = getenv( "VARCO_APPEND_ARGS" )))
++    {
++        static char buf[1024];
++        const char *s = list, *eq, *end;
++        while (*s)
++        {
++            eq = strchr( s, '=' );
++            end = strchr( s, ';' );
++            if (!end) end = s + strlen( s );
++            if (eq && eq < end && (unsigned int)(eq - s) == len && (size_t)(end - eq - 1) < sizeof(buf))
++            {
++                for (i = 0; i < len; i++)
++                {
++                    WCHAR c = base[i];
++                    char e = s[i];
++                    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++                    if (e >= 'A' && e <= 'Z') e += 'a' - 'A';
++                    if (c != (unsigned char)e) break;
++                }
++                if (i == len)
++                {
++                    memcpy( buf, eq + 1, end - eq - 1 );
++                    buf[end - eq - 1] = 0;
++                    return buf[0] ? buf : NULL;
++                }
++            }
++            s = *end ? end + 1 : end;
++        }
++    }
++    return NULL;
++}
++
+ void init_startup_info(void)
+ {
+     WCHAR *src, *dst, *env;
+@@ -2049,7 +2116,8 @@
+             + info->desktop_len + sizeof(WCHAR)
+             + info->shellinfo_len + sizeof(WCHAR)
+             + info->runtime_len + sizeof(WCHAR)
+-            + env_pos * sizeof(WCHAR));
++            + env_pos * sizeof(WCHAR)
++            + info->cmdline_len + 1024 * sizeof(WCHAR));  /* VARCO: room for the extended command line */
+ 
+     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&params, 0, &size,
+                                       MEM_COMMIT, PAGE_READWRITE );
+@@ -2103,9 +2171,26 @@
+     params->Environment = dst;
+     params->EnvironmentSize = env_pos * sizeof(WCHAR);
+     memcpy( dst, env, env_pos * sizeof(WCHAR) );
++    dst += env_pos;
+     free( env );
+     free( info );
+ 
++    {
++        const char *extra = varco_extra_args( &params->ImagePathName );
++        size_t n = extra ? strlen( extra ) : 0;
++        if (n && n < 1000)
++        {
++            WCHAR *buf = dst;
++            unsigned int i, old = params->CommandLine.Length / sizeof(WCHAR);
++            memcpy( buf, params->CommandLine.Buffer, old * sizeof(WCHAR) );
++            for (i = 0; i < n; i++) buf[old + i] = (unsigned char)extra[i];
++            buf[old + n] = 0;
++            params->CommandLine.Buffer = buf;
++            params->CommandLine.Length = (old + n) * sizeof(WCHAR);
++            params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
++        }
++    }
++
+     status = load_main_exe( &nt_name, machine, &module );
+     if (!NT_SUCCESS(status))
+     {

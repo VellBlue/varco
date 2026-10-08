@@ -1,0 +1,150 @@
+--- a/dlls/winemac.drv/d3dmetal.c
++++ b/dlls/winemac.drv/d3dmetal.c
+@@ -34,6 +34,57 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(macdrv_d3dmtl);
+ 
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* VARCO: per-game FPS limit, applied in [WineMetalLayer nextDrawable] (d3dmetal_objc.m).
++ * $VARCO_FPS_LIMIT forces a value; otherwise $WINEPREFIX/varco-fps.conf, written by Varco, is read:
++ *   "<game folder in steamapps\common, lowercase>\t<fps>"  or  "*\t<fps>" (default)
++ * The default only applies to Steam games (executables inside steamapps\common). 0 = no limit. */
++int varco_fps_limit(void)
++{
++    static int cached = -1;
++    const UNICODE_STRING *us;
++    char image[1024], line[600], needle[700];
++    const char *env, *prefix;
++    int i, n = 0, def = 0, found = -1, steam_game;
++    FILE *f;
++
++    if (cached >= 0) return cached;
++    if ((env = getenv("VARCO_FPS_LIMIT")) && *env) return cached = atoi(env);
++    /* The game's name comes from the TEB, which only exists on Wine threads: macdrv_init() computes the limit
++     * at startup; nextDrawable can arrive on a system thread (D3DMetal's queue), where it can't be read. */
++    if (!NtCurrentTeb()) return 0;
++    cached = 0;
++    if (!(prefix = getenv("WINEPREFIX"))) return 0;
++    snprintf(line, sizeof(line), "%s/varco-fps.conf", prefix);
++    if (!(f = fopen(line, "r"))) return 0;
++
++    us = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
++    for (i = 0; us->Buffer && i < us->Length / sizeof(WCHAR) && n < sizeof(image) - 1; i++)
++    {
++        WCHAR c = us->Buffer[i];
++        image[n++] = c < 128 ? ((c >= 'A' && c <= 'Z') ? c + 'a' - 'A' : (char)c) : '?';
++    }
++    image[n] = 0;
++    steam_game = strstr(image, "\\steamapps\\common\\") != NULL;
++
++    while (fgets(line, sizeof(line), f))
++    {
++        char *tab = strchr(line, '\t');
++        if (!tab) continue;
++        *tab = 0;
++        if (!strcmp(line, "*")) { def = atoi(tab + 1); continue; }
++        snprintf(needle, sizeof(needle), "\\steamapps\\common\\%s\\", line);
++        if (strstr(image, needle)) found = atoi(tab + 1);
++    }
++    fclose(f);
++    cached = found >= 0 ? found : (steam_game ? def : 0);
++    if (cached > 0) TRACE("VARCO: %d fps limit for %s\n", cached, debugstr_w(us->Buffer));
++    return cached;
++}
++
+ typedef LONG LSTATUS;
+ 
+ struct macdrv_functions_t
+--- a/dlls/winemac.drv/d3dmetal_objc.m
++++ b/dlls/winemac.drv/d3dmetal_objc.m
+@@ -34,7 +34,54 @@
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
++#include <mach/mach_time.h>
++#include <time.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
++/* VARCO: keeps the game at the requested pace (one frame every 1/fps seconds): sleeps for most of the wait
++ * and spins for the last millisecond, for an even cadence. If the game is late it doesn't
++ * catch up (no bursts of frames). VARCO_FPS_DEBUG=1 prints the real fps every 2 seconds. */
++static uint64_t varco_now_ns(void)
++{
++    static mach_timebase_info_data_t tb;
++    if (!tb.denom) mach_timebase_info(&tb);
++    return mach_absolute_time() * tb.numer / tb.denom;
++}
++
++static void varco_pace(int fps)
++{
++    static uint64_t next, debug_t0, debug_frames;
++    static int debug = -1;
++    const uint64_t interval = 1000000000ull / fps;
++    uint64_t now = varco_now_ns();
++
++    if (now < next)
++    {
++        uint64_t wait = next - now;
++        if (wait > 1500000)
++        {
++            struct timespec ts = { 0, (long)(wait - 1000000) };
++            nanosleep(&ts, NULL);
++        }
++        while ((now = varco_now_ns()) < next) ;
++    }
++    if (now > next + interval) next = now;   /* late: start again from now */
++    next += interval;
++
++    if (debug < 0) debug = getenv("VARCO_FPS_DEBUG") != NULL;
++    if (debug)
++    {
++        if (!debug_t0) debug_t0 = now;
++        if (++debug_frames, now - debug_t0 >= 2000000000ull)
++        {
++            fprintf(stderr, "VARCO: %.1f fps (limit %d)\n", debug_frames * 1e9 / (double)(now - debug_t0), fps);
++            debug_t0 = now; debug_frames = 0;
++        }
++    }
++}
++
++
+ @implementation WineMetalLayer
+ 
+     /* Extend [CAMetalLayer nextDrawable] so client_surface_present() can be
+@@ -67,6 +114,11 @@
+             }
+         }
+ 
++        {
++            int fps = varco_fps_limit();
++            if (fps > 0) varco_pace(fps);
++        }
++
+         return [super nextDrawable];
+     }
+ 
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -558,6 +558,8 @@
+ extern void macdrv_release_metal_device(macdrv_metal_device d);
+ extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
+ extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
++/* VARCO: per-game FPS limit (0 = no limit), see d3dmetal.c */
++extern int varco_fps_limit(void);
+ extern void macdrv_view_release_metal_view(macdrv_metal_view v);
+ extern bool macdrv_get_view_backing_size(macdrv_view v, int backing_size[2]);
+ extern void macdrv_set_view_backing_size(macdrv_view v, const int backing_size[2]);
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -459,6 +459,7 @@
+     init_win_context();
+     setup_options();
+     load_strings(params->strings);
++    varco_fps_limit();   /* VARCO: compute the FPS limit here, on a Wine thread (see d3dmetal.c) */
+ 
+     macdrv_err_on = ERR_ON(macdrv);
+     if (macdrv_start_cocoa_app(NtGetTickCount()))

@@ -1,0 +1,87 @@
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1502,6 +1502,57 @@
+ /***********************************************************************
+  *           find_builtin_dll
+  */
++/* VARCO: graphics backend chosen per process.
++ * The graphics DLLs are looked up first in $VARCO_D3DMETAL_DIR (D3DMetal),
++ * except for the processes listed in $VARCO_D3DMETAL_EXCLUDE (e.g. Steam),
++ * which use Wine's standard DLLs (wined3d). */
++static BOOL varco_is_gfx_dll( const char *name )
++{
++    static const char * const names[] = { "d3d10.dll", "d3d11.dll", "d3d12.dll", "dxgi.dll",
++                                          "atidxx64.dll", "nvapi64.dll", "nvngx.dll" };
++    unsigned int i;
++    for (i = 0; i < ARRAY_SIZE(names); i++) if (!strcmp( name, names[i] )) return TRUE;
++    return FALSE;
++}
++
++static BOOL varco_process_excluded(void)
++{
++    static const char default_list[] = "steam.exe,steamwebhelper.exe,steamservice.exe,gldriverquery.exe,"
++                                       "gldriverquery64.exe,vulkandriverquery.exe,vulkandriverquery64.exe,"
++                                       "steamerrorreporter.exe,steamerrorreporter64.exe";
++    const char *list = getenv( "VARCO_D3DMETAL_EXCLUDE" );
++    RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
++    char exe[64];
++    const WCHAR *path, *base;
++    unsigned int i, len;
++    const char *p;
++
++    if (!params || !params->ImagePathName.Buffer) return FALSE;
++    path = params->ImagePathName.Buffer;
++    len = params->ImagePathName.Length / sizeof(WCHAR);
++    base = path;
++    for (i = 0; i < len; i++) if (path[i] == '\\' || path[i] == '/') base = path + i + 1;
++    len -= base - path;
++    if (!len || len >= sizeof(exe)) return FALSE;
++    for (i = 0; i < len; i++)
++    {
++        if (base[i] > 127) return FALSE;
++        exe[i] = (base[i] >= 'A' && base[i] <= 'Z') ? base[i] + 'a' - 'A' : base[i];
++    }
++    exe[len] = 0;
++
++    if (!list) list = default_list;
++    for (p = list; *p; )
++    {
++        const char *end = strchr( p, ',' );
++        size_t n = end ? (size_t)(end - p) : strlen( p );
++        if (n == len && !strncmp( p, exe, n )) return TRUE;
++        if (!end) break;
++        p = end + 1;
++    }
++    return FALSE;
++}
++
+ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name, void **module,
+                                   SIZE_T *size_ptr, SECTION_IMAGE_INFORMATION *image_info,
+                                   ULONG_PTR limit_low, ULONG_PTR limit_high, USHORT search_machine,
+@@ -1592,6 +1643,26 @@
+         if (status != STATUS_DLL_NOT_FOUND) goto done;
+     }
+ 
++    {
++        const char *d3dm_dir = getenv( "VARCO_D3DMETAL_DIR" );
++        if (d3dm_dir && *d3dm_dir && varco_is_gfx_dll( file + pos + 1 ) && !varco_process_excluded())
++        {
++            ptr = file + pos;
++            ptr = prepend( ptr, pe_dir, strlen(pe_dir) );
++            ptr = prepend( ptr, d3dm_dir, strlen(d3dm_dir) );
++            status = open_builtin_pe_file( ptr, &attr, module, size_ptr, image_info, limit_low, limit_high,
++                                           load_machine, prefer_native, offset );
++            ptr = file + pos;
++            ptr = prepend( ptr, so_dir, strlen(so_dir) );
++            ptr = prepend( ptr, d3dm_dir, strlen(d3dm_dir) );
++            if (status != STATUS_DLL_NOT_FOUND)
++            {
++                TRACE( "Varco: %s from D3DMetal\n", debugstr_a(file + pos + 1) );
++                goto done;
++            }
++        }
++    }
++
+     for (i = 0; dll_paths[i]; i++)
+     {
+         ptr = file + pos;

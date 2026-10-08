@@ -1,0 +1,499 @@
+#!/bin/zsh
+# Varco — free app to play Windows games on a Mac, based on Wine.
+#
+# Available engines (per bottle, set in bottles/<name>/varco.conf):
+#   cx26    (default) Varco engine (Wine 11, built with GCC) + D3DMetal: Steam, DirectX 11/12.
+#   wine11  Wine 11 Staging + DXMT (DirectX 10/11 -> Metal). Fallback.
+#   gptk    Apple's Game Porting Toolkit (D3DMetal, DirectX 12 too). Older Wine.
+
+set -e
+SELF="${0:A}"; CLI_DIR="${SELF:h}"
+# Data (engines, bottles, logs): $VARCO_HOME, or ~/Varco if it exists, otherwise ~/Library/Application Support/Varco
+if [[ -n "$VARCO_HOME" ]]; then ROOT="$VARCO_HOME"
+elif [[ -d "$HOME/Varco/engines" ]]; then ROOT="$HOME/Varco"
+else ROOT="$HOME/Library/Application Support/Varco"; fi
+TOOLS="$CLI_DIR/tools"; [[ -d "$TOOLS" ]] || TOOLS="$ROOT/tools"
+BOTTLES="$ROOT/bottles"
+LOGS="$ROOT/logs"
+mkdir -p "$BOTTLES" "$LOGS"
+
+engine_bin() {
+  case "$1" in
+    wine11) echo "$ROOT/engines/wine-11.17/Contents/Resources/wine/bin" ;;
+    cx26)   echo "$ROOT/engines/cx26/bin" ;;
+    gptk)   echo "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin" ;;
+    *) echo "Unknown engine: $1 (use wine11, cx26 or gptk)" >&2; exit 1 ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+Usage: varco <command> [arguments]
+
+  list                              List the bottles
+  create <bottle> [cx26|wine11|gptk]     Create a new bottle (Windows 10, 64-bit)
+  run <bottle> <file.exe> [arg...]  Run a program (Mac path or C:\\...)
+  install <bottle> <setup.exe>      Like run, for installers
+  steam <bottle> [arg...]           Start Steam in the bottle
+  install-steam <bottle>            Download Steam's official installer (from Valve) and run it
+  install-store <bottle> <store>    Download and run a store's official installer: epic ea ubisoft battlenet
+  store <bottle> <store>            Open an installed store
+  stores <bottle>                   List the stores and whether they are installed (id=0|1)
+  install-dotnet <bottle>           Install Wine's .NET (wine-mono), needed by some installers (e.g. EA app)
+  doctor                            Dependency status (Rosetta, engine, D3DMetal)
+  setup-engine <file|url> [sha256]  Install or update the Varco engine
+  import-d3dmetal <file> [sha256]   Install D3DMetal (Varco .tar.xz package or Game Porting Toolkit .dmg)
+  game <bottle> <steam-appid> [arg...]  Start a Steam game by its ID
+  app <bottle> <name> steam|game|run [arg...]  Create a .app in ~/Applications/Varco
+  set <bottle> <KEY> <value>        Change a setting (e.g. ENGINE gptk, HUD 1)
+  dxmode <bottle> <appid> [dx11|dx12]  Show or change a game's DirectX version
+  fps <bottle> <appid>|default [n] Show or change a game's FPS limit (0 = none; default = new games)
+  pad <bottle> <appid> [ps|xbox]   Show or change how the game sees the DualSense (PlayStation or Xbox)
+  show <bottle>                     Show the settings
+  config <bottle>                   Open winecfg
+  regedit <bottle>                  Open the registry editor
+  cdrive <bottle>                   Open the C: drive in Finder
+  kill <bottle>                     Close everything running in the bottle
+  log <bottle>                      Show the latest log
+
+Settings (varco.conf):
+  ENGINE=cx26|wine11|gptk  Wine engine (default cx26)
+  HUD=0|1              Metal FPS counter
+  MSYNC=1|0            Fast synchronization (recommended)
+  RETINA=0|1           Full Retina resolution (sharper, heavier)
+  DXR=0|1              D3DMetal ray tracing (cx26/gptk)
+  METALFX=0|1          DLSS -> MetalFX (GPU reported as NVIDIA, cx26 only)
+  CMDCTRL=0|1          ⌘ keys used as Ctrl
+  OPTALT=0|1           ⌥ keys used as Alt
+  DPI=96|144|192       Windows interface size (100%, 150%, 200%); empty = leave as is
+  EXTRA_ENV="A=1 B=2"  Extra variables
+EOF
+}
+
+need_bottle() {
+  [[ -n "$1" ]] || { usage; exit 1; }
+  BOTTLE="$BOTTLES/$1"
+  [[ -d "$BOTTLE/drive_c" ]] || { echo "Bottle '$1' doesn't exist. See: varco list" >&2; exit 1; }
+}
+
+# Reads varco.conf safely: only known KEY="value" lines, everything else is ignored
+read_conf() {
+  [[ -f "$1" ]] || return 0
+  local line k v
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ '^(ENGINE|HUD|MSYNC|RETINA|DXR|METALFX|CMDCTRL|OPTALT|DPI|EXTRA_ENV)="?([^"]*)"?$' ]] || continue
+    k=$match[1]; v=$match[2]
+    typeset -g "$k=$v"
+  done < "$1"
+  return 0
+}
+
+load_env() {
+  ENGINE=cx26; HUD=0; MSYNC=1; RETINA=0; DXR=0; METALFX=0; CMDCTRL=0; OPTALT=0; DPI=""; EXTRA_ENV=""
+  read_conf "$BOTTLE/varco.conf"
+  BIN="$(engine_bin "$ENGINE")"
+  [[ -x "$BIN/wineserver" ]] || { echo "Engine '$ENGINE' not installed ($BIN)" >&2; exit 1; }
+  export PATH="$BIN:$PATH" WINEPREFIX="$BOTTLE" WINEDEBUG="${WINEDEBUG:--all}"
+  export WINEMSYNC="$MSYNC" WINEESYNC="$MSYNC"
+  if [[ "$ENGINE" == cx26 ]]; then
+    local F="$ROOT/engines/cx26/Frameworks"
+    export DYLD_FALLBACK_LIBRARY_PATH="$F:$F/GStreamer.framework/Versions/1.0/lib:/usr/lib"
+    export CX_GRAPHICS_BACKEND=d3dmetal
+    # libd3dshared for Rosetta, AVX, .NET under Rosetta
+    export CX_APPLEGPTK_LIBD3DSHARED_PATH="$ROOT/engines/cx26/lib/apple_gptk/external/libd3dshared.dylib"
+    # D3DMetal for games, wined3d (OpenGL) for Steam: see the VARCO patch in ntdll/unix/loader.c
+    export VARCO_D3DMETAL_DIR="$ROOT/engines/cx26/lib/apple_gptk/wine"
+    # programs with a CEF browser (Steam, Rockstar launcher, Epic and Ubisoft browsers): wined3d instead of D3DMetal.
+    # The windows of the Epic launcher (Unreal) and of the EA app (Qt) draw with Direct3D 11 and stay on D3DMetal:
+    # wined3d on the Mac's OpenGL lacks the recent Direct3D 11 shaders they use
+    export VARCO_D3DMETAL_EXCLUDE="steam.exe,steamwebhelper.exe,steamservice.exe,gldriverquery.exe,gldriverquery64.exe,vulkandriverquery.exe,vulkandriverquery64.exe,steamerrorreporter.exe,steamerrorreporter64.exe,launcher.exe,launcherpatcher.exe,rockstarservice.exe,socialclubhelper.exe,rockstarerrorhandler.exe,epicwebhelper.exe,eacefsubprocess.exe,qtwebengineprocess.exe,upc.exe,ubisoftconnect.exe,uplaywebcore.exe,battle.net.exe,battle.net launcher.exe,agent.exe"
+    # options added to Steam's browser (VARCO patch in ntdll/unix/env.c)
+    export VARCO_WEBHELPER_ARGS=" --no-sandbox --in-process-gpu --disable-gpu"
+    # as in Proton: the Rockstar launcher's browser with software ANGLE (no DirectComposition)
+    export VARCO_SOCIALCLUB_ARGS=" --use-gl=angle --use-angle=swiftshader --in-process-gpu"
+    # embedded browsers of Epic, EA app and Ubisoft Connect (CEF): like Steam's (VARCO patch in env.c).
+    # Ubisoft Connect starts its browser inside upc.exe and reads its options there: they go to upc.exe, not UplayWebCore
+    local cef=" --no-sandbox --in-process-gpu --disable-gpu"
+    # Battle.net uses the same Battle.net.exe for the program and for the browser processes: like steamwebhelper,
+    # the options go to all of them
+    export VARCO_APPEND_ARGS="epicwebhelper.exe=$cef;eadesktop.exe=$cef;upc.exe=$cef;battle.net.exe=$cef"
+    # child windows above OpenGL/Metal surfaces (patch 04): only for the EA app, nothing else changes
+    export VARCO_CHILD_OVERLAY="eadesktop.exe"
+    # launchers with Qt WebEngine (EA app): browser without GPU. GOG Galaxy 2.1 (Qt 6) doesn't render instead: its
+    # browser passes images through Direct3D 11 shared textures, which D3DMetal lacks (GOG games install with the
+    # offline installers from gog.com)
+    export QTWEBENGINE_DISABLE_SANDBOX=1 QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox --disable-gpu --disable-gpu-compositing"
+    export ROSETTA_ADVERTISE_AVX=1 DOTNET_EnableWriteXorExecute=0
+    # no Mono/Gecko download prompts when the bottle is updated; .NET (wine-mono) stays enabled only in the bottles
+    # where it is installed ("varco install-dotnet", which the EA app installation runs by itself)
+    local off="mscoree,mshtml"; [[ -d "$BOTTLE/drive_c/windows/mono" ]] && off="mshtml"
+    export WINEDLLOVERRIDES="$off=${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+  fi
+  [[ "$HUD" == 1 ]] && export MTL_HUD_ENABLED=1
+  [[ "$DXR" == 1 ]] && export D3DM_SUPPORT_DXR=1
+  if [[ "$METALFX" == 1 && "$ENGINE" == cx26 ]]; then
+    # DLSS -> MetalFX: GPU reported as NVIDIA (RTX 3080: no frame generation)
+    export D3DM_ENABLE_METALFX=1 D3DM_VENDOR_ID=0x10de D3DM_DEVICE_ID=0x2206 D3DM_DEVICE_DESCRIPTION="NVIDIA GeForce RTX 3080"
+    export D3DM_NVNGX_PATH="\\??\\unix$ROOT/engines/cx26/lib/apple_gptk/wine/x86_64-windows/nvngx.dll"
+  fi
+  [[ -n "$EXTRA_ENV" ]] && for kv in ${(s: :)EXTRA_ENV}; do export "$kv"; done
+  # Wine 11 + DXMT: Steam's interface without GPU (otherwise it crashes); cx26: no options
+  # cx26: Steam without options, ntdll adds the browser fixes
+  STEAM_FLAGS=""; [[ "$ENGINE" == wine11 ]] && STEAM_FLAGS="-cef-disable-gpu -cef-disable-gpu-compositing"
+  WINE="$BIN/wine"; [[ -x "$WINE" ]] || WINE="$BIN/wine64"
+  LOG="$LOGS/$(basename "$BOTTLE").log"
+  # past 50 MB the log moves to .old (replacing the previous one): it doesn't grow forever
+  if [[ -f "$LOG" ]] && (( $(stat -f %z "$LOG") > 52428800 )); then mv -f "$LOG" "$LOG.old"; fi
+}
+
+# External drives with game libraries (varco-drives.conf, e.g. "e=/Volumes/Pandora"):
+# Wine deletes the drive letter when the drive is disconnected, here it is recreated if the drive is there
+restore_drives() {
+  local f="$BOTTLE/varco-drives.conf" l target
+  [[ -f "$f" ]] || return 0
+  while IFS='=' read -r l target; do
+    [[ "$l" == [d-y] && -n "$target" && -d "$target" ]] || continue
+    [[ -e "$BOTTLE/dosdevices/$l:" ]] || ln -s "$target" "$BOTTLE/dosdevices/$l:"
+  done < "$f"
+}
+
+apply_retina() {
+  restore_drives
+  local r=n c=n o=n f; [[ "$RETINA" == 1 ]] && r=y; [[ "$CMDCTRL" == 1 ]] && c=y; [[ "$OPTALT" == 1 ]] && o=y
+  # Retina and keys (⌘ as Ctrl, ⌥ as Alt) of Wine's Mac driver: a single run of reg
+  f="$(mktemp /tmp/varco-macdrv.XXXXXX)"
+  printf 'REGEDIT4\r\n\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Mac Driver]\r\n"RetinaMode"="%s"\r\n"LeftCommandIsCtrl"="%s"\r\n"RightCommandIsCtrl"="%s"\r\n"LeftOptionIsAlt"="%s"\r\n"RightOptionIsAlt"="%s"\r\n' $r $c $c $o $o > "$f"
+  # interface size: with Retina, programs draw at real pixels and look small at 96 DPI
+  if [[ "$DPI" == <72-480> ]]; then
+    printf '\r\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\r\n"LogPixels"=dword:%08x\r\n' $DPI >> "$f"
+    printf '\r\n[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Hardware Profiles\\Current\\Software\\Fonts]\r\n"LogPixels"=dword:%08x\r\n' $DPI >> "$f"
+  fi
+  # Chinese, Japanese and Korean text: the Windows fonts Wine links them to become the Mac's fonts
+  printf '\r\n[HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes]\r\n"MS UI Gothic"="Hiragino Sans"\r\n"SimSun"="Hiragino Sans GB"\r\n"PMingLiU"="Hiragino Sans GB"\r\n"Gulim"="Apple SD Gothic Neo"\r\n' >> "$f"
+  # ...and explicit links, with the font's regular weight (REG_MULTI_SZ: "file,family" separated by zeros)
+  local link; link="$({ for e in "Hiragino Sans GB.ttc,Hiragino Sans GB" "AppleSDGothicNeo.ttc,Apple SD Gothic Neo"; do
+      print -rn -- "$e"; printf '\0'; done; printf '\0'; } | xxd -p | tr -d '\n' | sed 's/../&,/g; s/,$//')"
+  printf '\r\n[HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontLink\\SystemLink]\r\n' >> "$f"
+  for e in "Tahoma" "Microsoft Sans Serif" "Segoe UI" "Arial" "Lucida Sans Unicode"; do printf '"%s"=hex(7):%s\r\n' "$e" "$link" >> "$f"; done
+  # if Wine wasn't already running in this bottle, it shuts down its services once reg ends: a program started right
+  # then can quit silently (it happened with the EA app). So we wait for the server to finish (~3 s)
+  local st sock i running=0; st=( $(stat -f '%d %i' "$BOTTLE") )
+  sock="/tmp/.wine-$UID/server-$(printf '%x-%x' $st[1] $st[2])/socket"
+  [[ -S "$sock" ]] && running=1
+  "$WINE" reg import "$f" >/dev/null 2>&1 || true
+  rm -f "$f"
+  if (( ! running )); then
+    "$BIN/wineserver" -w & local w=$!
+    for i in {1..40}; do kill -0 $w 2>/dev/null || break; /bin/sleep 0.25; done
+    kill $w 2>/dev/null || true
+  fi
+  return 0
+}
+
+launch() {
+  echo "[$(date '+%F %T')] $ENGINE: $*" >> "$LOG"
+  # no nohup: it's a system binary and would clear the DYLD_* variables
+  "$WINE" "$@" >> "$LOG" 2>&1 < /dev/null &!
+}
+
+# Helper program: minimizes Steam when a game opens (one copy per bottle)
+start_helper() {
+  [[ -f "$TOOLS/varco-helper.exe" ]] || return 0
+  "$WINE" "$TOOLS/varco-helper.exe" >> "$LOG" 2>&1 < /dev/null &!
+}
+
+# Game settings (FPS limit, DirectX version): tools/varco-tool, built by scripts/build-app.sh
+vtool() {
+  [[ -x "$TOOLS/varco-tool" ]] || { echo "Missing $TOOLS/varco-tool: build it with scripts/build-app.sh" >&2; return 1; }
+  "$TOOLS/varco-tool" "$@"
+}
+
+# DualSense: normally passed to Wine as a PlayStation controller (HID), as Death Stranding and The Witcher 3 want.
+# Games that only read Xbox controllers (XInput), like RDR2, get it as an Xbox pad instead ("varco pad").
+# The switch only reloads the winebus driver: Steam and the bottle stay open.
+set_pad_mode() {
+  local want="$1" state="$BOTTLE/.varco-pad" cur=ps d
+  [[ -f "$state" ]] && cur="$(<"$state")"
+  [[ "$cur" == "$want" ]] && return 0
+  for d in 054c/0ce6 054c/0df2; do   # DualSense, DualSense Edge
+    if [[ "$want" == xbox ]]; then
+      "$WINE" reg add "HKLM\\System\\CurrentControlSet\\Services\\WineBus\\Devices\\$d" /v Hidraw /t REG_DWORD /d 0 /f >/dev/null 2>&1
+    else
+      "$WINE" reg delete "HKLM\\System\\CurrentControlSet\\Services\\WineBus\\Devices\\$d" /f >/dev/null 2>&1
+    fi
+  done
+  "$WINE" sc stop winebus >/dev/null 2>&1 || true; "$WINE" sc start winebus >/dev/null 2>&1 || true
+  echo "$want" > "$state"
+  echo "[$(date '+%F %T')] DualSense in $want mode" >> "$LOG"
+}
+
+# Stores and launchers: official installer (from the vendor's website) and installed program
+typeset -A STORE_NAME STORE_URL STORE_EXE
+STORE_NAME=(epic "Epic Games Launcher" ea "EA app" ubisoft "Ubisoft Connect" battlenet "Battle.net")
+STORE_URL=(
+  epic      "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/installer/download/EpicGamesLauncherInstaller.msi"
+  ea        "https://origin-a.akamaihd.net/EA-Desktop-Client-Download/installer-releases/EAappInstaller.exe"
+  ubisoft   "https://static3.cdn.ubi.com/orbit/launcher_installer/UbisoftConnectInstaller.exe"
+  battlenet "https://downloader.battle.net/download/getInstallerForGame?os=win&gameProgram=BATTLENET_APP&version=Live")
+STORE_EXE=(   # possible paths, separated by |
+  epic      'C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe|C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
+  ea        'C:\Program Files\Electronic Arts\EA Desktop\*\EA Desktop\EADesktop.exe'   # * = folder named after the version
+  ubisoft   'C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\UbisoftConnect.exe|C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\upc.exe'
+  battlenet 'C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe|C:\Program Files (x86)\Battle.net\Battle.net.exe')
+# Wine's .NET (wine-mono): version and SHA-256 are the ones the engine asks for (dlls/appwiz.cpl/addons.c)
+MONO_VERSION="10.4.1"; MONO_SHA="071f4b2887e1c97a11d791ff3d65be9429eed6dec4c2708888bfd546ba358e23"
+install_mono() {
+  [[ -d "$BOTTLE/drive_c/windows/mono" ]] && return 0
+  local f="$ROOT/downloads/wine-mono-$MONO_VERSION-x86.msi"
+  if [[ "$(shasum -a 256 "$f" 2>/dev/null | cut -d' ' -f1)" != "$MONO_SHA" ]]; then
+    echo "Downloading .NET for Wine (wine-mono $MONO_VERSION)..."
+    mkdir -p "$ROOT/downloads"
+    curl -fsSL --max-time 900 -o "$f.part" "https://dl.winehq.org/wine/wine-mono/$MONO_VERSION/wine-mono-$MONO_VERSION-x86.msi" || { rm -f "$f.part"; echo "wine-mono download failed" >&2; return 1; }
+    [[ "$(shasum -a 256 "$f.part" | cut -d' ' -f1)" == "$MONO_SHA" ]] || { rm -f "$f.part"; echo "wine-mono SHA-256 check failed" >&2; return 1; }
+    mv "$f.part" "$f"
+  fi
+  echo "Installing .NET for Wine..."
+  WINEDLLOVERRIDES="mshtml=" "$WINE" msiexec /i "$f" /qn >> "$LOG" 2>&1
+  "$BIN/wineserver" -w
+  [[ -d "$BOTTLE/drive_c/windows/mono" ]] || { echo "wine-mono installation failed" >&2; return 1; }
+  load_env   # now mscoree stays enabled
+}
+# Mac path of a C:\... program
+unix_path() { local w="${1#C:\\}"; print -r -- "$BOTTLE/drive_c/${w//\\//}"; }
+# a store's first installed path, on the Mac (with "*" the folder with the highest version wins)
+store_exe() {
+  local e u f
+  for e in ${(s:|:)STORE_EXE[$1]}; do
+    u="$(unix_path "$e")"
+    if [[ $u == *'*'* ]]; then f=( "${u%%\**}"*"${u#*\*}"(N.n) ); else f=( "$u"(N.) ); fi
+    (( $#f )) && { print -r -- "${f[-1]}"; return 0; }
+  done
+  return 1
+}
+need_store() { [[ -n "$1" && -n "${STORE_URL[$1]}" ]] || { echo "Unknown store: use ${(kj:, :)STORE_URL}" >&2; exit 1; }; }
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  list)
+    for b in "$BOTTLES"/*(N/); do
+      e=$(ENGINE=cx26; read_conf "$b/varco.conf"; echo ${ENGINE:-cx26})
+      printf "%-20s engine: %s\n" "$(basename "$b")" "$e"
+    done ;;
+  create)
+    [[ -n "$1" ]] || { usage; exit 1; }
+    [[ "$1" =~ '^[A-Za-z0-9 _-]+$' ]] || { echo "Invalid name: use letters, numbers, spaces, - and _" >&2; exit 1; }
+    BOTTLE="$BOTTLES/$1"; [[ -d "$BOTTLE/drive_c" ]] && { echo "It already exists." >&2; exit 1; }   # a half-made folder is reused
+    [[ -x "$(engine_bin "${2:-cx26}")/wineserver" ]] || { echo "Engine '${2:-cx26}' not installed: install it before creating a bottle" >&2; exit 1; }
+    # Retina with the interface at 200%: normal-size, sharp windows and text
+    mkdir -p "$BOTTLE"; printf 'ENGINE="%s"\nMSYNC="1"\nHUD="0"\nRETINA="1"\nDPI="192"\nDXR="0"\nMETALFX="0"\nEXTRA_ENV=""\n' "${2:-cx26}" > "$BOTTLE/varco.conf"
+    load_env
+    echo "Creating bottle '$1' with $ENGINE..."
+    "$WINE" wineboot --init >> "$LOG" 2>&1 || { echo "Bottle creation failed (see: varco log $1)" >&2; exit 1; }
+    "$WINE" winecfg -v win10 >> "$LOG" 2>&1 || true
+    "$BIN/wineserver" -w
+    echo "Done: $BOTTLE" ;;
+  run|install)
+    need_bottle "$1"; shift; load_env; apply_retina
+    exe="$1"; shift
+    [[ -f "$exe" ]] && exe="$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe")"
+    case "${exe:l}" in
+      *.msi)       launch msiexec /i "$exe" "$@" ;;
+      *.lnk|*.url) launch start /unix "$exe" "$@" ;;
+      *)           launch "$exe" "$@" ;;
+    esac
+    echo "Started. Log: varco log $(basename "$BOTTLE")" ;;
+  steam)
+    need_bottle "$1"; shift; load_env; apply_retina
+    [[ "$*" == *-shutdown* ]] || { set_pad_mode ps; vtool fps "$BOTTLE" --write-conf 2>/dev/null || true; }
+    launch 'C:\Program Files (x86)\Steam\steam.exe' ${(z)STEAM_FLAGS} "$@"
+    start_helper
+    echo "Steam started." ;;
+  doctor)
+    # dependency status (used by the app's setup assistant)
+    arch -x86_64 /usr/bin/true 2>/dev/null && echo "rosetta=1" || echo "rosetta=0"
+    [[ -x "$ROOT/engines/cx26/bin/wine" ]] && echo "engine=1" || echo "engine=0"
+    echo "engine_version=$(cat "$ROOT/engines/cx26/VERSION" 2>/dev/null || echo 0)"
+    [[ -f "$ROOT/engines/cx26/lib/apple_gptk/external/libd3dshared.dylib" && -f "$ROOT/engines/cx26/lib/apple_gptk/wine/x86_64-windows/d3d12.dll" ]] && echo "d3dmetal=1" || echo "d3dmetal=0"
+    n=0; for b in "$BOTTLES"/*(N/); do [[ -f "$b/drive_c/Program Files (x86)/Steam/steam.exe" ]] && n=$((n + 1)); done
+    echo "steam_bottles=$n"; echo "root=$ROOT" ;;
+  setup-engine)
+    # varco setup-engine <package.tar.xz | https://...> [sha256] — install or update the engine (D3DMetal stays where it is)
+    src="$1"; sum="$2"; [[ -n "$src" ]] || { usage; exit 1; }
+    if pgrep -f -- "$ROOT/engines/cx26/" >/dev/null; then   # pgrep doesn't match itself (grep always does)
+      echo "The engine is in use: quit Steam and your games, then try again." >&2; exit 1
+    fi
+    mkdir -p "$ROOT/engines" "$ROOT/downloads"; work="$(mktemp -d "$ROOT/downloads/engine.XXXXXX")"
+    if [[ "$src" == https://* ]]; then
+      echo "Downloading the engine..."; curl -fL --progress-bar -o "$work/engine.tar.xz" "$src"; pkg="$work/engine.tar.xz"
+    else pkg="$src"; fi
+    if [[ -n "$sum" ]]; then
+      got="$(shasum -a 256 "$pkg" | cut -d' ' -f1)"
+      [[ "$got" == "$sum" ]] || { echo "SHA-256 check failed: the file isn't the published one" >&2; exit 1; }
+    fi
+    echo "Extracting..."; tar -xJf "$pkg" -C "$work"
+    [[ -x "$work/cx26/bin/wine" ]] || { echo "Invalid engine package" >&2; exit 1; }
+    dst="$ROOT/engines/cx26"
+    if [[ -d "$dst/lib/apple_gptk" ]]; then mkdir -p "$work/cx26/lib"; mv "$dst/lib/apple_gptk" "$work/cx26/lib/apple_gptk"; fi
+    if [[ -d "$dst" ]]; then [[ -d "$dst.old" ]] && mv "$dst.old" "$work/old-previous"; mv "$dst" "$dst.old"; fi
+    mv "$work/cx26" "$dst"
+    [[ "$src" == https://* ]] && mv "$work/engine.tar.xz" "$ROOT/downloads/varco-engine.tar.xz"
+    echo "Engine installed in $dst" ;;
+  import-d3dmetal)
+    # varco import-d3dmetal <.tar.xz package | Game Porting Toolkit .dmg | folder> [sha256] — copies Apple's D3DMetal
+    # into the engine. Apple's license allows redistributing it for non-commercial purposes only (see docs/).
+    src="$1"; [[ -e "$src" ]] || { echo "File not found: $src" >&2; exit 1; }
+    [[ -d "$ROOT/engines/cx26" ]] || { echo "Install the Varco engine first" >&2; exit 1; }
+    dst="$ROOT/engines/cx26/lib/apple_gptk"; mnt=""; tmpx=""; base="$src"
+    if [[ -n "$2" ]]; then   # expected sha256 (package downloaded from the Varco Releases)
+      [[ "$(shasum -a 256 "$src" | cut -d' ' -f1)" == "$2" ]] || { echo "SHA-256 check failed" >&2; exit 1; }
+    fi
+    if [[ "$src" == *.tar.xz ]]; then
+      tmpx="$(mktemp -d /tmp/varco-d3dm.XXXXXX)"; base="$tmpx"; tar -xJf "$src" -C "$base"
+    elif [[ "$src" == *.dmg ]]; then
+      mnt="$(mktemp -d /tmp/varco-gptk.XXXXXX)"
+      hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "$src" >/dev/null
+      base="$mnt"
+    fi
+    trap '[[ -n "$mnt" ]] && { hdiutil detach -quiet "$mnt" 2>/dev/null; rmdir "$mnt" 2>/dev/null; }; [[ -n "$tmpx" ]] && rm -rf "$tmpx"' EXIT
+    fw="$(find "$base" -maxdepth 7 -type d -name D3DMetal.framework -print -quit)"
+    # in the Game Porting Toolkit the .so files are links to libd3dshared.dylib: look for both files and links
+    win="$(find "$base" -maxdepth 7 \( -type f -o -type l \) -name d3d12.dll -path '*x86_64-windows*' -print -quit)"
+    unx="$(find "$base" -maxdepth 7 \( -type f -o -type l \) -name d3d12.so -path '*x86_64-unix*' -print -quit)"
+    [[ -n "$fw" && -f "${fw:h}/libd3dshared.dylib" && -n "$win" && -n "$unx" ]] || { echo "D3DMetal not found: choose Apple's Game Porting Toolkit .dmg file" >&2; exit 1; }
+    mkdir -p "$dst/external" "$dst/wine/x86_64-windows" "$dst/wine/x86_64-unix"
+    [[ -d "$dst/external/D3DMetal.framework" ]] && mv "$dst/external/D3DMetal.framework" "$(mktemp -d /tmp/varco-old-d3dm.XXXXXX)/"
+    ditto "$fw" "$dst/external/D3DMetal.framework"
+    cp -f "${fw:h}/libd3dshared.dylib" "$dst/external/"
+    cp -af "${win:h}"/*.dll "$dst/wine/x86_64-windows/"
+    cp -af "${unx:h}"/*.so "$dst/wine/x86_64-unix/"
+    # DLSS → MetalFX: nvngx is the variant that uses MetalFX
+    for ext in dll so; do d="$dst/wine/x86_64-$([[ $ext == dll ]] && echo windows || echo unix)"
+      [[ -e "$d/nvngx-on-metalfx.$ext" ]] && cp -af "$d/nvngx-on-metalfx.$ext" "$d/nvngx.$ext"; done
+    for f in License.rtf "Read Me.rtf" Acknowledgements.rtf NOTICE.txt; do
+      n="$(find "$base" -maxdepth 4 -type f -name "$f" -print -quit)"; [[ -n "$n" ]] && cp -f "$n" "$dst/"
+    done
+    echo "D3DMetal installed." ;;
+  install-steam)
+    # varco install-steam <bottle> — downloads Steam's official installer from Valve's server and runs it in the bottle
+    need_bottle "$1"; load_env; apply_retina
+    mkdir -p "$ROOT/downloads"; setup="$ROOT/downloads/SteamSetup.exe"
+    curl -fsSL --max-time 120 -o "$setup.part" "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe" || { echo "Steam download failed" >&2; exit 1; }
+    # minimal check: it must be a Windows executable ("MZ" header) of plausible size
+    [[ "$(head -c 2 "$setup.part")" == "MZ" && $(stat -f %z "$setup.part") -gt 1000000 ]] || { rm -f "$setup.part"; echo "Invalid Steam file" >&2; exit 1; }
+    mv "$setup.part" "$setup"
+    launch "$setup"
+    echo "Steam installer started." ;;
+  install-store)
+    # varco install-store <bottle> <store> — downloads the store's official installer and runs it in the bottle
+    need_bottle "$1"; need_store "$2"; load_env; apply_retina; id="$2"
+    [[ $id == ea ]] && { install_mono || exit 1; }   # the EA app installer has actions written in .NET
+    mkdir -p "$ROOT/downloads"; ext=exe; [[ "${STORE_URL[$id]}" == *.msi ]] && ext=msi
+    setup="$ROOT/downloads/$id-installer.$ext"
+    echo "Downloading ${STORE_NAME[$id]}..."
+    curl -fsSL --max-time 1800 -o "$setup.part" "${STORE_URL[$id]}" || { rm -f "$setup.part"; echo "Download failed" >&2; exit 1; }
+    # minimal check: Windows executable ("MZ") or MSI package, of plausible size
+    magic="$(head -c 4 "$setup.part" | xxd -p)"
+    [[ ( "$magic" == 4d5a* || "$magic" == d0cf11e0 ) && $(stat -f %z "$setup.part") -gt 300000 ]] || { rm -f "$setup.part"; echo "Invalid installer file" >&2; exit 1; }
+    mv "$setup.part" "$setup"
+    if [[ $ext == msi ]]; then launch msiexec /i "$setup"; else launch "$setup"; fi
+    echo "${STORE_NAME[$id]} installer started." ;;
+  store)
+    need_bottle "$1"; need_store "$2"; load_env; apply_retina; id="$2"; shift 2
+    exe="$(store_exe $id)" || { echo "${STORE_NAME[$id]} isn't installed in this bottle." >&2; exit 1; }
+    set_pad_mode ps
+    extra=(); [[ $id == epic ]] && extra=(-SkipBuildPatchPrereq)   # don't reinstall the prerequisites at every start
+    # Battle.net (32-bit browser) checks that its already-written data pages report "read/write" and not
+    # "copy on write": the engine option that emulates it, for Battle.net only
+    [[ $id == battlenet ]] && export WINE_SIMULATE_WRITECOPY=1
+    # the EA app (Qt) already scales itself on high-DPI screens: on top of the interface at 200% it would double
+    [[ $id == ea ]] && export QT_ENABLE_HIGHDPI_SCALING=0
+    # through start: this way it's a process started by Windows and gets the VARCO_APPEND_ARGS arguments
+    # (for the EA app this also skips EALauncher.exe, which can't start EADesktop.exe under Wine)
+    launch start /unix "$exe" $extra "$@"
+    start_helper
+    echo "${STORE_NAME[$id]} started." ;;
+  stores)
+    need_bottle "$1"
+    for id in epic ea ubisoft battlenet; do store_exe $id >/dev/null && echo "$id=1" || echo "$id=0"; done ;;
+  install-dotnet)
+    need_bottle "$1"; load_env; install_mono && echo ".NET for Wine installed." ;;
+  pad)
+    # varco pad <bottle> <steam-appid> [ps|xbox] — how the game sees the DualSense: PlayStation (HID) or Xbox (XInput)
+    need_bottle "$1"; [[ -n "$2" ]] || { usage; exit 1; }
+    [[ -z "$3" || "$3" == (ps|xbox) ]] || { echo "Use ps or xbox" >&2; exit 1; }
+    vtool pad "$BOTTLE" "$2" $3 ;;
+  game)
+    need_bottle "$1"; shift; load_env; apply_retina
+    id="$1"; shift
+    set_pad_mode "$(vtool pad "$BOTTLE" "$id" 2>/dev/null || echo ps)"
+    vtool fps "$BOTTLE" --write-conf 2>/dev/null || true
+    # RDR2: always true fullscreen (in "borderless" it stays in a window smaller than the screen
+    # and the FPS limit, which uses the screen's refresh rate, doesn't work)
+    if [[ "$id" == 1174180 ]] && ! ps -ax -o command | grep -qi '[\\/]rdr2\.exe'; then
+      for f in "$BOTTLE"/drive_c/users/*/Documents/Rockstar\ Games/Red\ Dead\ Redemption\ 2/Settings/system.xml(N); do
+        sed -i '' -E 's/(<windowed value=")[0-9]+(")/\10\2/' "$f"
+      done
+    fi
+    launch 'C:\Program Files (x86)\Steam\steam.exe' ${(z)STEAM_FLAGS} -applaunch "$id" "$@"
+    start_helper
+    echo "Starting game $id through Steam..." ;;
+  app)
+    need_bottle "$1"; name="$2"; b="$1"; shift 2
+    [[ -n "$name" && -n "$1" ]] || { usage; exit 1; }
+    dest="$HOME/Applications/Varco/$name.app"; mkdir -p "$HOME/Applications/Varco"
+    sub="$1"; shift
+    [[ "$sub" == (steam|game|run) ]] || { echo "The app command must be steam, game or run" >&2; exit 1; }
+    script="${(qq)SELF} $sub ${(qq)b}"; for a in "$@"; do script+=" ${(qq)a}"; done
+    rm -rf "$dest"
+    # AppleScript string: escape \ and "
+    as="${script//\\/\\\\}"; as="${as//\"/\\\"}"
+    osacompile -o "$dest" -e "do shell script \"$as\"" >/dev/null
+    [[ -n "$ICON" && -f "$ICON" ]] && { sips -s format icns "$ICON" --out "$dest/Contents/Resources/applet.icns" >/dev/null 2>&1 || true; }
+    touch "$dest"
+    echo "Created: $dest" ;;
+  fps)
+    # varco fps <bottle> <steam-appid>|default [value] — show or change the FPS limit (0 = no limit).
+    # Each game uses its best method: the game's own settings (The Witcher 3, Death Stranding) or Varco's
+    # limiter in the engine. "default" applies to every game without its own value, new ones included.
+    need_bottle "$1"; id="$2"; val="$3"
+    [[ -n "$id" ]] || { usage; exit 1; }
+    [[ -z "$val" || "$val" == <0-240> ]] || { echo "Invalid value: use a number between 0 (no limit) and 240" >&2; exit 1; }
+    exe=""; case "$id" in 292030) exe="witcher3.exe" ;; 1850570) exe="ds.exe" ;; esac
+    if [[ -n "$val" && -n "$exe" ]] && ps -ax -o command | grep -qi "[\\/]$exe"; then
+      echo "Close the game first: otherwise it overwrites the setting when it quits." >&2; exit 2
+    fi
+    vtool fps "$BOTTLE" "$id" "$val" ;;
+  dxmode)
+    # varco dxmode <bottle> <steam-appid> [dx11|dx12] — show or change the DirectX version used by the game
+    need_bottle "$1"; b="$1"; id="$2"; mode="$3"
+    [[ -n "$id" ]] || { usage; exit 1; }
+    [[ -z "$mode" || "$mode" == (dx11|dx12) ]] || { echo "Use dx11 or dx12" >&2; exit 1; }
+    steam_running=0; ps -ax -o command | grep -q "[s]team\.exe" && steam_running=1
+    vtool dxmode "$BOTTLE" "$id" "$mode" "$steam_running" ;;
+  set)
+    # varco set <bottle> KEY value [KEY value ...] — one write at a time, atomic
+    need_bottle "$1"; b="$1"; shift; conf="$BOTTLE/varco.conf"
+    lock="$BOTTLE/.varco.lock"; tries=0
+    until mkdir "$lock" 2>/dev/null; do (( ++tries > 100 )) && { echo "Settings busy, try again." >&2; exit 1; }; sleep 0.05; done
+    trap 'rmdir "$lock" 2>/dev/null' EXIT
+    ENGINE=""; HUD=""; MSYNC=""; RETINA=""; DXR=""; METALFX=""; CMDCTRL=""; OPTALT=""; DPI=""; EXTRA_ENV=""
+    read_conf "$conf"
+    typeset -A vals; for k in ENGINE MSYNC HUD RETINA DXR METALFX CMDCTRL OPTALT DPI EXTRA_ENV; do vals[$k]="${(P)k}"; done
+    while (( $# >= 2 )); do
+      [[ "$1" == (ENGINE|HUD|MSYNC|RETINA|DXR|METALFX|CMDCTRL|OPTALT|DPI|EXTRA_ENV) ]] || { echo "Unknown key: $1" >&2; exit 1; }
+      vals[$1]="$2"; echo "$1 set to $2 for '$b'."; shift 2
+    done
+    tmp="$conf.tmp.$$"; : > "$tmp"
+    for k in ENGINE MSYNC HUD RETINA DXR METALFX CMDCTRL OPTALT DPI EXTRA_ENV; do [[ -n "${vals[$k]}" || "$k" == EXTRA_ENV ]] && print -r -- "$k=\"${vals[$k]}\"" >> "$tmp"; done
+    mv "$tmp" "$conf" ;;
+  show)
+    need_bottle "$1"; load_env
+    echo "Bottle: $BOTTLE"; echo "Engine: $ENGINE ($("$WINE" --version 2>/dev/null))"
+    echo "HUD=$HUD MSYNC=$MSYNC RETINA=$RETINA DXR=$DXR METALFX=$METALFX CMDCTRL=$CMDCTRL OPTALT=$OPTALT DPI=$DPI EXTRA_ENV=\"$EXTRA_ENV\"" ;;
+  config)  need_bottle "$1"; load_env; launch winecfg ;;
+  regedit) need_bottle "$1"; load_env; launch regedit ;;
+  cdrive)  need_bottle "$1"; open "$BOTTLE/drive_c" ;;
+  kill)    need_bottle "$1"; load_env; "$BIN/wineserver" -k 2>/dev/null || true; echo "Bottle '$1' closed." ;;
+  log)     need_bottle "$1"; load_env; tail -n 60 "$LOG" ;;
+  *) usage ;;
+esac

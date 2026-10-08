@@ -1,0 +1,6 @@
+build/
+build.noindex/
+*.o
+.DS_Store
+/release/
+cli/tools/varco-tool

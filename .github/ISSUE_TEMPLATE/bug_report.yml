@@ -1,0 +1,21 @@
+name: Bug report
+description: Something in Varco doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! In Varco, **Report a problem…** (at the bottom of a bottle's page) copies the details of
+        your Mac, engine and bottle: paste them in the last box. They don't include your Mac user name.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details from Varco
+      description: Paste what "Report a problem…" copied.

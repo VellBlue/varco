@@ -1,0 +1,37 @@
+name: Game report
+description: Tell others how a game runs with Varco
+labels: [game]
+body:
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Name and store, for example "Red Dead Redemption 2 (Steam)".
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: How does it run?
+      options:
+        - Works well
+        - Works, with some issues
+        - Starts, but isn't playable
+        - Doesn't start
+    validations:
+      required: true
+  - type: input
+    id: performance
+    attributes:
+      label: Settings and performance
+      description: Resolution, graphics preset, FPS.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything you had to change (DirectX version, controller mode, FPS limit, launch options) and any issue you noticed.
+  - type: textarea
+    id: details
+    attributes:
+      label: Details from Varco
+      description: Optional. Paste what "Report a problem…" copied.
