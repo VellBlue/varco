@@ -22,7 +22,7 @@ let cliPath: String = Bundle.main.path(forResource: "varco", ofType: nil, inDire
 /// engine/package-*.sh) and size: scripts/build-app.sh warns if they don't match the packages in ../varco-release.
 enum VarcoRelease {
     /// App version (scripts/build-app.sh copies it into Info.plist; Release tags are "v" + version)
-    static let appVersion = "1.0.1"
+    static let appVersion = "1.0.2"
     static let repo = URL(string: "https://github.com/VellBlue/varco")!
     static let latestAPI = URL(string: "https://api.github.com/repos/VellBlue/varco/releases/latest")!
     static let newIssue = URL(string: "https://github.com/VellBlue/varco/issues/new/choose")!
