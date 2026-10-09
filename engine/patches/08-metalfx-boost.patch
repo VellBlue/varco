@@ -259,3 +259,135 @@
      }
  
  @end
+--- a/dlls/winemac.drv/mouse.c
++++ b/dlls/winemac.drv/mouse.c
+@@ -126,6 +126,10 @@
+  *
+  * Update the various window states on a mouse event.
+  */
++/* VARCO BOOST: a window macOS shows away from its Windows position (see varco_shift_frame in window.c) */
++extern HWND varco_shift_hwnd;
++extern int varco_shift_x, varco_shift_y;
++
+ static void send_mouse_input(HWND hwnd, macdrv_window cocoa_window, UINT flags, int x, int y,
+                              DWORD mouse_data, BOOL drag, unsigned long time)
+ {
+@@ -133,6 +137,11 @@
+     HWND top_level_hwnd;
+ 
+     top_level_hwnd = NtUserGetAncestor(hwnd, GA_ROOT);
++    if (varco_shift_hwnd && (flags & MOUSEEVENTF_ABSOLUTE))   /* VARCO: positions on screen -> Windows positions */
++    {
++        x += varco_shift_x;
++        y += varco_shift_y;
++    }
+ 
+     if ((flags & MOUSEEVENTF_MOVE) && (flags & MOUSEEVENTF_ABSOLUTE) && !drag &&
+         cocoa_window != macdrv_thread_data()->capture_window)
+@@ -669,8 +678,9 @@
+ 
+     if (clip)
+     {
+-        rect = CGRectMake(clip->left, clip->top, max(1, clip->right - clip->left),
+-                          max(1, clip->bottom - clip->top));
++        rect = CGRectMake(clip->left - (varco_shift_hwnd ? varco_shift_x : 0),   /* VARCO */
++                          clip->top - (varco_shift_hwnd ? varco_shift_y : 0),
++                          max(1, clip->right - clip->left), max(1, clip->bottom - clip->top));
+     }
+     else
+         rect = CGRectInfinite;
+@@ -696,6 +706,11 @@
+         TRACE("pointer at (%g,%g) server pos %d,%d\n", pt.x, pt.y, pos->x, pos->y);
+         pos->x = floor(pt.x);
+         pos->y = floor(pt.y);
++        if (varco_shift_hwnd)   /* VARCO */
++        {
++            pos->x += varco_shift_x;
++            pos->y += varco_shift_y;
++        }
+     }
+     return ret;
+ }
+@@ -839,7 +854,14 @@
+  */
+ BOOL macdrv_SetCursorPos(INT x, INT y)
+ {
+-    BOOL ret = macdrv_set_cursor_position(CGPointMake(x, y));
++    BOOL ret;
++
++    if (varco_shift_hwnd)   /* VARCO */
++    {
++        x -= varco_shift_x;
++        y -= varco_shift_y;
++    }
++    ret = macdrv_set_cursor_position(CGPointMake(x, y));
+     if (ret)
+         TRACE("warped to %d,%d\n", x, y);
+     else
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -774,6 +774,48 @@
+             cgrect[i] = cgrect_from_rect(rect[i]);
+     }
+     return data;
++}
++
++
++/* VARCO BOOST: with a lower emulated resolution, D3DMetal centers a game's fullscreen window on the screen's
++ * real size, so the window (as large as the screen) ends up shifted by half a screen. Moving it would make
++ * D3DMetal leave fullscreen, so Windows keeps its position and only macOS shows it at the screen's corner:
++ * varco_shift_x/y is what Cocoa positions of that window lack to be Windows positions (mouse, frame changes).
++ * Only with $VARCO_BOOST=1; one window per process. */
++HWND varco_shift_hwnd;
++int varco_shift_x, varco_shift_y;
++
++static BOOL varco_shift_enabled(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        const char *env = getenv("VARCO_BOOST");
++        on = env && atoi(env) > 0;
++    }
++    return on;
++}
++
++static void varco_shift_frame(HWND hwnd, CGRect *frame)
++{
++    CGRect desktop;
++
++    if (!varco_shift_enabled()) return;
++    desktop = macdrv_get_desktop_rect();
++    if (frame->size.width == desktop.size.width && frame->size.height == desktop.size.height &&
++        (frame->origin.x != desktop.origin.x || frame->origin.y != desktop.origin.y))
++    {
++        varco_shift_x = frame->origin.x - desktop.origin.x;
++        varco_shift_y = frame->origin.y - desktop.origin.y;
++        varco_shift_hwnd = hwnd;
++        TRACE("VARCO: %p shown at the screen's corner, shifted by %d,%d\n", hwnd, varco_shift_x, varco_shift_y);
++        frame->origin = desktop.origin;
++    }
++    else if (varco_shift_hwnd == hwnd)
++    {
++        varco_shift_hwnd = 0;
++        varco_shift_x = varco_shift_y = 0;
++    }
+ }
+ 
+ 
+@@ -790,6 +832,7 @@
+     {
+         if (data->minimized) return;
+ 
++        varco_shift_frame(data->hwnd, &frame);   /* VARCO */
+         constrain_window_frame(&frame.origin, &frame.size);
+         if (frame.size.width < 1 || frame.size.height < 1)
+             frame.size.width = frame.size.height = 1;
+@@ -1887,6 +1930,7 @@
+           event->window_frame_changed.fullscreen, event->window_frame_changed.in_resize);
+ 
+     rect = rect_from_cgrect(event->window_frame_changed.frame);
++    if (hwnd == varco_shift_hwnd) OffsetRect(&rect, varco_shift_x, varco_shift_y);   /* VARCO: see varco_shift_frame */
+     rect = window_rect_from_visible(&data->rects, rect);
+     width = rect.right - rect.left;
+     height = rect.bottom - rect.top;

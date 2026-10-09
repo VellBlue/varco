@@ -154,6 +154,7 @@ struct BottleSettings: Equatable {
     var retina = false
     var dxr = false
     var metalfx = false
+    var boost = false        // MetalFX Boost: games at a lower fullscreen resolution, enlarged by MetalFX
     var cmdctrl = false
     var optalt = false
     /// Windows interface size in DPI (96 = 100%, 192 = 200%); 0 = not set (Windows uses 96)
@@ -180,6 +181,7 @@ struct Bottle: Identifiable, Hashable {
             case "RETINA": s.retina = parts[1] == "1"
             case "DXR": s.dxr = parts[1] == "1"
             case "METALFX": s.metalfx = parts[1] == "1"
+            case "BOOST": s.boost = parts[1] == "1"
             case "CMDCTRL": s.cmdctrl = parts[1] == "1"
             case "OPTALT": s.optalt = parts[1] == "1"
             case "DPI": s.dpi = Int(parts[1]) ?? 0
@@ -1138,6 +1140,7 @@ struct BottleView: View {
         if old.retina != new.retina { pairs.append(("RETINA", new.retina ? "1" : "0")) }
         if old.dxr != new.dxr { pairs.append(("DXR", new.dxr ? "1" : "0")) }
         if old.metalfx != new.metalfx { pairs.append(("METALFX", new.metalfx ? "1" : "0")) }
+        if old.boost != new.boost { pairs.append(("BOOST", new.boost ? "1" : "0")) }
         if old.cmdctrl != new.cmdctrl { pairs.append(("CMDCTRL", new.cmdctrl ? "1" : "0")) }
         if old.optalt != new.optalt { pairs.append(("OPTALT", new.optalt ? "1" : "0")) }
         if old.dpi != new.dpi { pairs.append(("DPI", String(new.dpi))) }
@@ -1259,6 +1262,8 @@ struct BottleView: View {
                     .disabled(settings.engine == "wine11")
                 Toggle(L("DLSS → MetalFX (la GPU appare come NVIDIA ai giochi)", "DLSS → MetalFX (the GPU looks like NVIDIA to games)"), isOn: $settings.metalfx)
                     .disabled(settings.engine != "cx26")
+                Toggle(L("Varco Boost: più FPS con MetalFX (giochi a schermo intero a risoluzione ridotta)", "Varco Boost: more FPS with MetalFX (games in fullscreen at a lower resolution)"), isOn: $settings.boost)
+                    .disabled(settings.engine != "cx26")
                 Toggle(L("Usa ⌘ come Ctrl", "Use ⌘ as Ctrl"), isOn: $settings.cmdctrl)
                 Toggle(L("Usa ⌥ come Alt", "Use ⌥ as Alt"), isOn: $settings.optalt)
                 if bottle.hasSteam && defaultFPS >= 0 {
@@ -1283,7 +1288,7 @@ struct BottleView: View {
             .formStyle(.grouped)
             .frame(maxWidth: 560)
             .scrollDisabled(true)
-            Text(L("Il limite FPS vale per tutti i giochi che non ne hanno uno proprio, anche quelli che scaricherai: per cambiarlo su un solo gioco, clic destro sulla copertina → Limite FPS. Il risparmio batteria scatta da solo quando stacchi l'alimentatore, anche a gioco aperto, e si toglie quando lo ricolleghi.", "The FPS limit applies to every game without its own limit, including the ones you'll download: to change it for one game, right-click its cover → FPS limit. The battery saver kicks in by itself when you unplug the power adapter, even mid-game, and turns off when you plug it back in."))
+            Text(L("Il limite FPS vale per tutti i giochi che non ne hanno uno proprio, anche quelli che scaricherai: per cambiarlo su un solo gioco, clic destro sulla copertina → Limite FPS. Il risparmio batteria scatta da solo quando stacchi l'alimentatore, anche a gioco aperto, e si toglie quando lo ricolleghi. Con Varco Boost scegli nel gioco lo schermo intero a una risoluzione più bassa (per esempio metà): il Mac non cambia risoluzione e Varco ingrandisce l'immagine con MetalFX. Red Dead Redemption 2 viene impostato da solo.", "The FPS limit applies to every game without its own limit, including the ones you'll download: to change it for one game, right-click its cover → FPS limit. The battery saver kicks in by itself when you unplug the power adapter, even mid-game, and turns off when you plug it back in. With Varco Boost, choose fullscreen at a lower resolution in the game (for example half): the Mac's display doesn't change and Varco enlarges the image with MetalFX. Red Dead Redemption 2 is set up automatically."))
                 .font(.callout).foregroundStyle(.secondary)
             Text(EngineChoices.hasWine11 || settings.engine == "wine11"
                  ? L("Le modifiche valgono dal prossimo avvio. Con Wine 11 i giochi che richiedono DirectX 12 non partono: in quel caso usa il motore Varco + D3DMetal.", "Changes apply from the next launch. With Wine 11, games that require DirectX 12 won't start: use the Varco + D3DMetal engine for those.")

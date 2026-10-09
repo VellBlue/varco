@@ -6,6 +6,7 @@
 //        varco-tool fps <bottle> --write-conf                    regenerate varco-fps.conf (also done at every start)
 //        varco-tool dxmode <bottle> <steam-appid> [dx11|dx12] <0|1 Steam running>
 //        varco-tool pad <bottle> <steam-appid> [ps|xbox]           how the game sees the DualSense
+//        varco-tool screen                                       main display size: points, then pixels
 //
 // FPS limit: each game uses the best method it has.
 //  - The Witcher 3 and Death Stranding have a limit in their own settings: that one is changed;
@@ -13,6 +14,7 @@
 //    (dlls/winemac.drv/d3dmetal*.{c,m}), which reads <bottle>/varco-fps.conf: "<game folder>\t<fps>" and "*\t<fps>".
 // Preferences live in <bottle>/varco-games.conf as "<appid>.fps=N" and "default.fps=N".
 import Foundation
+import CoreGraphics
 
 let NATIVE: Set<String> = ["292030", "1850570"]   // games with their own limiter in their settings
 let fm = FileManager.default
@@ -344,6 +346,15 @@ func pad(_ a: [String]) throws {
     print(mode == "xbox" ? "Controller: Xbox" : "Controller: PlayStation")
 }
 
+/// The main display's size in points and in pixels ("1352 878 2704 1756"): with Boost, games run at the size in
+/// points and MetalFX enlarges them to the pixels. No permission needed (CoreGraphics, not AppleScript).
+func screen() {
+    let d = CGMainDisplayID(), b = CGDisplayBounds(d)
+    var pw = Int(b.width), ph = Int(b.height)
+    if let m = CGDisplayCopyDisplayMode(d) { pw = m.pixelWidth; ph = m.pixelHeight }
+    print("\(Int(b.width)) \(Int(b.height)) \(pw) \(ph)")
+}
+
 // MARK: -
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -352,7 +363,8 @@ do {
     case "fps": try fps(Array(args.dropFirst()))
     case "dxmode": try dxmode(Array(args.dropFirst()))
     case "pad": try pad(Array(args.dropFirst()))
-    default: fail("usage: varco-tool fps|dxmode|pad ...")
+    case "screen": screen()
+    default: fail("usage: varco-tool fps|dxmode|pad|screen ...")
     }
 } catch {
     fail("Error: \(error.localizedDescription)")

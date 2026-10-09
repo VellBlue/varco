@@ -86,6 +86,9 @@ static BOOL CALLBACK confirm_warning(HWND h, LPARAM l)
 static BOOL CALLBACK snap_fullscreen(HWND h, LPARAM l)
 {
     RECT r; MONITORINFO mi = { sizeof(mi) }; DWORD pid; WCHAR name[128];
+    /* with Boost the engine shows such windows in place without moving them: moving one would make D3DMetal leave
+     * fullscreen */
+    if (GetEnvironmentVariableW(L"VARCO_BOOST", name, 128) && name[0] != L'0') return FALSE;
     if (!IsWindowVisible(h) || IsIconic(h) || GetWindow(h, GW_OWNER)) return TRUE;
     if (!GetWindowRect(h, &r) || !GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) return TRUE;
     if (r.right - r.left != mi.rcMonitor.right - mi.rcMonitor.left || r.bottom - r.top != mi.rcMonitor.bottom - mi.rcMonitor.top) return TRUE;

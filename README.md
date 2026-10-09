@@ -18,6 +18,9 @@ A free, open-source app to play your Steam library on Apple Silicon Macs.</p>
   and Bluetooth controllers respond faster.
 - **Per-game FPS limit**: uses the game's own setting when it has one, otherwise Varco's frame limiter
   (built into the engine). Off by default; you can also set one limit for every game, including future downloads.
+- **Varco Boost**: up to ~45% more FPS in games limited by the GPU. Turn it on in the bottle's settings and choose
+  fullscreen at a lower resolution in the game (Red Dead Redemption 2 is set up automatically): the Mac's display
+  doesn't change and MetalFX enlarges the image to the screen's full resolution.
 - **Battery saver**: on battery, every game is limited to 60 FPS (or 30/40), switching on and off by itself when you
   unplug or plug in the power adapter, even mid-game. It can be turned off in the settings.
 - **Other stores**: Epic Games, the EA app, Ubisoft Connect and Battle.net install with one click from their official
@@ -64,7 +67,7 @@ CrossOver 26.3, with a few patches of its own (`engine/patches/`):
 | `05-optional-unwind-outputs` | Lets games pass empty output pointers to the stack unwinder, as Windows does (prevents a crash at startup) |
 | `06-app-bundles-game-mode` | Runs each program from its own small app bundle, declared as a game (stores and launchers as tools), so macOS can turn on Game Mode |
 | `07-battery-fps-limit` | Applies a lower FPS limit while the Mac runs on battery, following the power source as it changes |
-| `08-metalfx-boost` | Experimental, off by default (`VARCO_BOOST=1`): when a game renders below its window's resolution, enlarges the image with MetalFX instead of the compositor's blurry scaling |
+| `08-metalfx-boost` | Varco Boost: a game in fullscreen at a lower resolution renders at that size (the Mac's display never changes) and is enlarged to the screen with MetalFX; its window is shown at the screen's corner even when D3DMetal places it off-center |
 
 Everything else lives in the `varco` command-line tool (`cli/varco`), which the app calls.
 

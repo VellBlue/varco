@@ -81,7 +81,7 @@ read_conf() {
   [[ -f "$1" ]] || return 0
   local line k v
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ '^(ENGINE|HUD|MSYNC|RETINA|DXR|METALFX|CMDCTRL|OPTALT|DPI|EXTRA_ENV)="?([^"]*)"?$' ]] || continue
+    [[ "$line" =~ '^(ENGINE|HUD|MSYNC|RETINA|DXR|METALFX|CMDCTRL|OPTALT|DPI|EXTRA_ENV|BOOST)="?([^"]*)"?$' ]] || continue
     k=$match[1]; v=$match[2]
     typeset -g "$k=$v"
   done < "$1"
@@ -89,7 +89,7 @@ read_conf() {
 }
 
 load_env() {
-  ENGINE=cx26; HUD=0; MSYNC=1; RETINA=0; DXR=0; METALFX=0; CMDCTRL=0; OPTALT=0; DPI=""; EXTRA_ENV=""
+  ENGINE=cx26; HUD=0; MSYNC=1; RETINA=0; DXR=0; METALFX=0; CMDCTRL=0; OPTALT=0; DPI=""; BOOST=0; EXTRA_ENV=""
   read_conf "$BOTTLE/varco.conf"
   BIN="$(engine_bin "$ENGINE")"
   [[ -x "$BIN/wineserver" ]] || { echo "Engine '$ENGINE' not installed ($BIN)" >&2; exit 1; }
@@ -134,6 +134,8 @@ load_env() {
     export WINEDLLOVERRIDES="$off=${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
   fi
   [[ "$HUD" == 1 ]] && export MTL_HUD_ENABLED=1
+  # Boost: games set to a lower fullscreen resolution render at that size and the engine enlarges them with MetalFX
+  [[ "$BOOST" == 1 && "$ENGINE" == cx26 ]] && export VARCO_BOOST=1
   [[ "$DXR" == 1 ]] && export D3DM_SUPPORT_DXR=1
   if [[ "$METALFX" == 1 && "$ENGINE" == cx26 ]]; then
     # DLSS -> MetalFX: GPU reported as NVIDIA (RTX 3080: no frame generation)
@@ -167,6 +169,10 @@ apply_retina() {
   # Retina and keys (⌘ as Ctrl, ⌥ as Alt) of Wine's Mac driver: a single run of reg
   f="$(mktemp /tmp/varco-macdrv.XXXXXX)"
   printf 'REGEDIT4\r\n\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Mac Driver]\r\n"RetinaMode"="%s"\r\n"LeftCommandIsCtrl"="%s"\r\n"RightCommandIsCtrl"="%s"\r\n"LeftOptionIsAlt"="%s"\r\n"RightOptionIsAlt"="%s"\r\n' $r $c $c $o $o > "$f"
+  # Boost: resolution changes are emulated for every program of the bottle (the Mac's display never changes; with
+  # only the game emulating, the others would write the real resolution back)
+  local em=N; [[ "$BOOST" == 1 && "$ENGINE" == cx26 ]] && em=Y
+  printf '\r\n[HKEY_CURRENT_USER\\Software\\Wine\\X11 Driver]\r\n"EmulateModeset"="%s"\r\n' $em >> "$f"
   # interface size: with Retina, programs draw at real pixels and look small at 96 DPI
   if [[ "$DPI" == <72-480> ]]; then
     printf '\r\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\r\n"LogPixels"=dword:%08x\r\n' $DPI >> "$f"
@@ -431,11 +437,22 @@ case "$cmd" in
     id="$1"; shift
     set_pad_mode "$(vtool pad "$BOTTLE" "$id" 2>/dev/null || echo ps)"
     vtool fps "$BOTTLE" --write-conf 2>/dev/null || true
-    # RDR2: always borderless fullscreen. In true fullscreen it switches the Mac's display to its own resolution
-    # (often a non-Retina one) and its window keeps the old size, covering only part of the screen.
+    # RDR2: borderless fullscreen at the display's pixels. In true fullscreen it switches the Mac's display to its own
+    # resolution (often a non-Retina one) and its window keeps the old size, covering only part of the screen.
+    # With Boost: true fullscreen at the display's size in points (half its pixels), emulated, enlarged by MetalFX.
     if [[ "$id" == 1174180 ]] && ! ps -ax -o command | grep -qi '[\\/]rdr2\.exe'; then
+      wh=( ${(s: :)"$(vtool screen 2>/dev/null)"} )
       for f in "$BOTTLE"/drive_c/users/*/Documents/Rockstar\ Games/Red\ Dead\ Redemption\ 2/Settings/system.xml(N); do
-        sed -i '' -E 's/(<windowed value=")[0-9]+(")/\12\2/' "$f"
+        if (( $#wh == 4 )); then
+          # fullscreen reads screenWidth/Height, borderless screenWidthWindowed/HeightWindowed
+          if [[ -n "$VARCO_BOOST" ]]; then mode=0 key=screen w=$wh[1] h=$wh[2]; else mode=2 key=screen w=$wh[3] h=$wh[4]; fi
+          sed -i '' -E -e "s/(<windowed value=\")[0-9]+(\")/\1$mode\2/" -e "s/(<${key}Width value=\")[0-9]+(\")/\1$w\2/" \
+            -e "s/(<${key}Height value=\")[0-9]+(\")/\1$h\2/" "$f"
+          [[ -z "$VARCO_BOOST" ]] && sed -i '' -E -e "s/(<screenWidthWindowed value=\")[0-9]+(\")/\1$w\2/" \
+            -e "s/(<screenHeightWindowed value=\")[0-9]+(\")/\1$h\2/" "$f"
+        else
+          sed -i '' -E 's/(<windowed value=")[0-9]+(")/\12\2/' "$f"
+        fi
       done
     fi
     launch 'C:\Program Files (x86)\Steam\steam.exe' ${(z)STEAM_FLAGS} -applaunch "$id" "$@"
@@ -481,20 +498,20 @@ case "$cmd" in
     lock="$BOTTLE/.varco.lock"; tries=0
     until mkdir "$lock" 2>/dev/null; do (( ++tries > 100 )) && { echo "Settings busy, try again." >&2; exit 1; }; sleep 0.05; done
     trap 'rmdir "$lock" 2>/dev/null' EXIT
-    ENGINE=""; HUD=""; MSYNC=""; RETINA=""; DXR=""; METALFX=""; CMDCTRL=""; OPTALT=""; DPI=""; EXTRA_ENV=""
+    ENGINE=""; HUD=""; MSYNC=""; RETINA=""; DXR=""; METALFX=""; CMDCTRL=""; OPTALT=""; DPI=""; BOOST=""; EXTRA_ENV=""
     read_conf "$conf"
-    typeset -A vals; for k in ENGINE MSYNC HUD RETINA DXR METALFX CMDCTRL OPTALT DPI EXTRA_ENV; do vals[$k]="${(P)k}"; done
+    typeset -A vals; for k in ENGINE MSYNC HUD RETINA DXR METALFX CMDCTRL OPTALT DPI BOOST EXTRA_ENV; do vals[$k]="${(P)k}"; done
     while (( $# >= 2 )); do
-      [[ "$1" == (ENGINE|HUD|MSYNC|RETINA|DXR|METALFX|CMDCTRL|OPTALT|DPI|EXTRA_ENV) ]] || { echo "Unknown key: $1" >&2; exit 1; }
+      [[ "$1" == (ENGINE|HUD|MSYNC|RETINA|DXR|METALFX|CMDCTRL|OPTALT|DPI|EXTRA_ENV|BOOST) ]] || { echo "Unknown key: $1" >&2; exit 1; }
       vals[$1]="$2"; echo "$1 set to $2 for '$b'."; shift 2
     done
     tmp="$conf.tmp.$$"; : > "$tmp"
-    for k in ENGINE MSYNC HUD RETINA DXR METALFX CMDCTRL OPTALT DPI EXTRA_ENV; do [[ -n "${vals[$k]}" || "$k" == EXTRA_ENV ]] && print -r -- "$k=\"${vals[$k]}\"" >> "$tmp"; done
+    for k in ENGINE MSYNC HUD RETINA DXR METALFX CMDCTRL OPTALT DPI BOOST EXTRA_ENV; do [[ -n "${vals[$k]}" || "$k" == EXTRA_ENV ]] && print -r -- "$k=\"${vals[$k]}\"" >> "$tmp"; done
     mv "$tmp" "$conf" ;;
   show)
     need_bottle "$1"; load_env
     echo "Bottle: $BOTTLE"; echo "Engine: $ENGINE ($("$WINE" --version 2>/dev/null))"
-    echo "HUD=$HUD MSYNC=$MSYNC RETINA=$RETINA DXR=$DXR METALFX=$METALFX CMDCTRL=$CMDCTRL OPTALT=$OPTALT DPI=$DPI EXTRA_ENV=\"$EXTRA_ENV\"" ;;
+    echo "HUD=$HUD MSYNC=$MSYNC RETINA=$RETINA DXR=$DXR METALFX=$METALFX CMDCTRL=$CMDCTRL OPTALT=$OPTALT DPI=$DPI BOOST=$BOOST EXTRA_ENV=\"$EXTRA_ENV\"" ;;
   config)  need_bottle "$1"; load_env; launch winecfg ;;
   regedit) need_bottle "$1"; load_env; launch regedit ;;
   cdrive)  need_bottle "$1"; open "$BOTTLE/drive_c" ;;

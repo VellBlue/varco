@@ -18,6 +18,9 @@ Un'app gratuita e open source per giocare la tua libreria Steam sui Mac con Appl
   e i controller Bluetooth rispondono più in fretta.
 - **Limite FPS per ogni gioco**: usa l'impostazione del gioco quando c'è, altrimenti il limitatore di Varco
   (integrato nel motore). Di base è spento; puoi anche impostare un limite unico per tutti i giochi, anche quelli futuri.
+- **Varco Boost**: fino a circa il 45% di FPS in più nei giochi limitati dalla scheda grafica. Si attiva nelle
+  impostazioni della bottiglia e nel gioco si sceglie lo schermo intero a una risoluzione più bassa (Red Dead
+  Redemption 2 viene impostato da solo): lo schermo del Mac non cambia e MetalFX ingrandisce l'immagine a piena risoluzione.
 - **Risparmio batteria**: a batteria ogni gioco è limitato a 60 FPS (o 30/40), e il limite si attiva e si toglie da
   solo quando stacchi o ricolleghi l'alimentatore, anche a gioco aperto. Si può disattivare nelle impostazioni.
 - **Altri negozi**: Epic Games, EA app, Ubisoft Connect e Battle.net si installano con un clic dai loro siti
@@ -68,7 +71,7 @@ CrossOver 26.3, con alcune modifiche proprie (`engine/patches/`):
 | `05-optional-unwind-outputs` | Accetta puntatori di uscita vuoti nel riavvolgimento dello stack, come Windows (evita un crash all'avvio) |
 | `06-app-bundles-game-mode` | Avvia ogni programma da un suo piccolo pacchetto app dichiarato come gioco (negozi e launcher come strumenti), così macOS può attivare la Modalità Gioco |
 | `07-battery-fps-limit` | Applica un limite FPS più basso quando il Mac va a batteria, seguendo l'alimentazione mentre cambia |
-| `08-metalfx-boost` | Sperimentale, spento di default (`VARCO_BOOST=1`): quando un gioco disegna sotto la risoluzione della sua finestra, ingrandisce l'immagine con MetalFX invece del ridimensionamento sfocato di macOS |
+| `08-metalfx-boost` | Varco Boost: un gioco a schermo intero a risoluzione ridotta disegna a quella misura (lo schermo del Mac non cambia mai) e viene ingrandito con MetalFX; la sua finestra è mostrata nell'angolo dello schermo anche quando D3DMetal la posiziona fuori centro |
 
 Il resto è nel comando `varco` (`cli/varco`), che l'app usa per ogni operazione.
 
