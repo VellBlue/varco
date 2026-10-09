@@ -13,6 +13,9 @@ A free, open-source app to play your Steam library on Apple Silicon Macs.</p>
 - **Your Steam library, on macOS.** Install Steam once: every game you download shows up in Varco by itself,
   with its cover, DirectX version and download progress.
 - **DirectX 11 and 12** through Apple's D3DMetal, **DirectX 9–11** through Wine.
+- **macOS Game Mode**: every game runs as its own Mac app of the "games" category, so macOS turns on
+  Game Mode for it: the game gets priority on the CPU and GPU, while stores, launchers and browsers wait behind it,
+  and Bluetooth controllers respond faster.
 - **Per-game FPS limit**: uses the game's own setting when it has one, otherwise Varco's frame limiter
   (built into the engine). Off by default; you can also set one limit for every game, including future downloads.
 - **Other stores**: Epic Games, the EA app, Ubisoft Connect and Battle.net install with one click from their official
@@ -57,6 +60,7 @@ CrossOver 26.3, with a few patches of its own (`engine/patches/`):
 | `03-fps-limiter` | Per-game frame limiter for every D3DMetal game |
 | `04-child-windows-over-opengl` | Shows child windows (for example the browser with the EA app's sign-in page) above windows drawn with OpenGL/Metal, as on Windows (EA app only) |
 | `05-optional-unwind-outputs` | Lets games pass empty output pointers to the stack unwinder, as Windows does (prevents a crash at startup) |
+| `06-app-bundles-game-mode` | Runs each program from its own small app bundle, declared as a game (stores and launchers as tools), so macOS can turn on Game Mode |
 
 Everything else lives in the `varco` command-line tool (`cli/varco`), which the app calls.
 

@@ -1,0 +1,173 @@
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -648,6 +648,131 @@
+         free(app_name);
+     }
+ }
++
++/* VARCO: write s into f with the XML special characters escaped */
++static void varco_xml( FILE *f, const char *s )
++{
++    for (; *s; s++)
++    {
++        if (*s == '&') fputs( "&amp;", f );
++        else if (*s == '<') fputs( "&lt;", f );
++        else if (*s == '>') fputs( "&gt;", f );
++        else fputc( *s, f );
++    }
++}
++
++/* VARCO: a program is a game unless it is part of Windows (C:\\windows) or listed in $VARCO_NOT_GAMES
++ * ("steam.exe,launcher.exe": stores, launchers, browsers, crash reporters). Only games ask macOS for Game Mode,
++ * which then gives them priority over everything else, those tools included. */
++static BOOL varco_is_game( const char *name, const char *image_path )
++{
++    const char *list = getenv( "VARCO_NOT_GAMES" ), *p, *end;
++    char path[1024], exe[256];
++    size_t i, n;
++
++    for (i = 0; image_path[i] && i < sizeof(path) - 1; i++)
++        path[i] = image_path[i] == '\\' ? '/' : (image_path[i] >= 'A' && image_path[i] <= 'Z') ? image_path[i] + 32 : image_path[i];
++    path[i] = 0;
++    if (strstr( path, "/windows/" )) return FALSE;
++    if (!list) return TRUE;
++    for (i = 0; name[i] && i < sizeof(exe) - 5; i++) exe[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
++    strcpy( exe + i, ".exe" );
++    n = strlen( exe );
++    for (p = list; *p; p = end + 1)
++    {
++        if (!(end = strchr( p, ',' ))) end = p + strlen( p );
++        if ((size_t)(end - p) == n && !strncasecmp( p, exe, n )) return FALSE;
++        if (!*end) break;
++    }
++    return TRUE;
++}
++
++/* VARCO: runs each Windows program from its own small app bundle in the temporary folder
++ * (<name>.app/Contents/MacOS/<name>, a hard link to the loader, next to a link to ntdll.so) whose Info.plist
++ * declares a game: macOS sees an app with the program's name, of the "games" category, and can turn on
++ * Game Mode for it. If anything fails, the loader is used as it is. */
++static void varco_use_app_bundle( char **wineloader_path, const char *image_path )
++{
++    char *name = extract_exe_name( image_path ), *dir = NULL, *app = NULL, *exe = NULL, *link_ntdll = NULL;
++    char *ntdll = NULL, *plist = NULL, *tmp = NULL, *p, id[64];
++    const char *cat;
++    BOOL game;
++    static const char *const subdirs[] = { "", ".app", ".app/Contents", ".app/Contents/MacOS" };
++    struct stat st;
++    unsigned int i, n;
++    FILE *f;
++
++    if (!name) return;
++    n = strlen( name );
++    if (n > 4 && !strcasecmp( name + n - 4, ".exe" )) name[n - 4] = 0;
++    for (p = name; *p; p++) if (*p == '/' || *p == ':' || (unsigned char)*p < 32) *p = '_';
++    if (!*name || !(dir = create_tempdir( *wineloader_path ))) goto done;
++    /* games and tools in separate folders: macOS remembers an app's category by its path */
++    game = varco_is_game( name, image_path );
++    cat = game ? "game" : "tool";
++
++    for (i = 0; i < ARRAY_SIZE(subdirs); i++)
++    {
++        free( app );
++        if (asprintf( &app, "%s%s%s%s%s", dir, cat, i ? "/" : "", i ? name : "", subdirs[i] ) < 0) { app = NULL; goto done; }
++        if (mkdir( app, 0700 ) && errno != EEXIST) goto done;
++    }
++    if (asprintf( &exe, "%s/%s", app, name ) < 0) { exe = NULL; goto done; }
++    if (asprintf( &link_ntdll, "%s/ntdll.so", app ) < 0) { link_ntdll = NULL; goto done; }
++    if (asprintf( &plist, "%s%s/%s.app/Contents/Info.plist", dir, cat, name ) < 0) { plist = NULL; goto done; }
++    if (asprintf( &tmp, "%s.%d", plist, (int)getpid() ) < 0) { tmp = NULL; goto done; }
++    ntdll = strdup( *wineloader_path );
++    if ((p = strrchr( ntdll, '/' ))) *p = 0;
++    if (asprintf( &p, "%s/ntdll.so", ntdll ) < 0) goto done;
++    free( ntdll );
++    ntdll = p;
++
++    /* the folder's name changes with the loader, so existing links always point to the right files */
++    if (lstat( link_ntdll, &st ) && symlink( ntdll, link_ntdll )) goto done;
++    if (stat( exe, &st ) && link( *wineloader_path, exe )) goto done;   /* hard link: same volume only */
++    if (stat( plist, &st ))
++    {
++        for (i = 0, p = name; *p && i < sizeof(id) - 1; p++)
++            if ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-') id[i++] = *p;
++            else if (*p >= 'A' && *p <= 'Z') id[i++] = *p - 'A' + 'a';
++        id[i] = 0;
++        if (!(f = fopen( tmp, "w" ))) goto done;
++        fputs( "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++               "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
++               "<plist version=\"1.0\">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>", f );
++        varco_xml( f, name );
++        fprintf( f, "</string>\n    <key>CFBundleIdentifier</key>\n    <string>io.github.vellblue.varco.app.%s</string>\n"
++                 "    <key>CFBundleName</key>\n    <string>", *id ? id : "program" );
++        varco_xml( f, name );
++        fputs( "</string>\n    <key>CFBundleInfoDictionaryVersion</key>\n    <string>6.0</string>\n"
++               "    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n"
++               "    <key>CFBundleShortVersionString</key>\n    <string>1.0</string>\n", f );
++        if (game)
++            fputs( "    <key>LSApplicationCategoryType</key>\n    <string>public.app-category.games</string>\n"
++                   "    <key>LSSupportsGameMode</key>\n    <true/>\n", f );
++        else
++            fputs( "    <key>LSApplicationCategoryType</key>\n    <string>public.app-category.utilities</string>\n", f );
++        fputs( "    <key>LSUIElement</key>\n    <string>1</string>\n"
++               "    <key>NSPrincipalClass</key>\n    <string>WineApplication</string>\n"
++               "</dict>\n</plist>\n", f );
++        if (fclose( f ) || rename( tmp, plist )) { unlink( tmp ); goto done; }
++    }
++
++    free( *wineloader_path );
++    *wineloader_path = exe;
++    exe = NULL;
++    setenv( "WINEPRELOADERAPPNAME", name, 1 );
++
++done:
++    free( name );
++    free( dir );
++    free( app );
++    free( exe );
++    free( link_ntdll );
++    free( ntdll );
++    free( plist );
++    free( tmp );
++}
+ #endif
+ 
+ 
+@@ -681,6 +806,8 @@
+      */
+     if (getenv("WINEDLLPATH"))
+         replace_wineloader_path_with_link( &(argv[1]), image_path );
++    else if (getenv( "VARCO_APP_BUNDLES" ))   /* VARCO */
++        varco_use_app_bundle( &(argv[1]), image_path );
+ #endif
+ 
+     execv( argv[1], argv + 1 );
+--- a/loader/wine_info.plist.in
++++ b/loader/wine_info.plist.in
+@@ -7,13 +7,13 @@
+     <key>CFBundleDevelopmentRegion</key>
+     <string>English</string>
+     <key>CFBundleExecutable</key>
+-    <string>wineloader</string><!-- CrossOver Hack 10913 -->
++    <string>wineloader</string>
+     <key>CFBundleIdentifier</key>
+-    <string>com.codeweavers.CrossOver.wineloader</string><!-- CrossOver Hack 10913 -->
++    <string>io.github.vellblue.varco.wineloader</string>
+     <key>CFBundleInfoDictionaryVersion</key>
+     <string>6.0</string>
+     <key>CFBundleName</key>
+-    <string>CrossOver-Hosted Application</string><!-- CrossOver Hack 10913 -->
++    <string>Varco</string><!-- bundle name padding --><!-- the loader writes the program's name here -->
+     <key>CFBundlePackageType</key>
+     <string>APPL</string>
+     <key>CFBundleShortVersionString</key>
+@@ -24,6 +24,10 @@
+     <string>@PACKAGE_VERSION@</string>
+     <key>NSPrincipalClass</key>
+     <string>WineApplication</string>
++    <key>LSApplicationCategoryType</key>
++    <string>public.app-category.games</string>
++    <key>LSSupportsGameMode</key>
++    <true/>
+     <key>LSUIElement</key>
+     <string>1</string>
+ </dict>

@@ -13,6 +13,9 @@ Un'app gratuita e open source per giocare la tua libreria Steam sui Mac con Appl
 - **La tua libreria Steam, su macOS.** Installi Steam una volta: ogni gioco che scarichi compare in Varco da solo,
   con copertina, versione DirectX e avanzamento del download.
 - **DirectX 11 e 12** con D3DMetal di Apple, **DirectX 9–11** con Wine.
+- **Modalità Gioco di macOS**: ogni gioco gira come un'app Mac a sé della categoria "giochi", così macOS
+  attiva la Modalità Gioco: il gioco ha la priorità su CPU e GPU, negozi, launcher e browser passano in secondo piano
+  e i controller Bluetooth rispondono più in fretta.
 - **Limite FPS per ogni gioco**: usa l'impostazione del gioco quando c'è, altrimenti il limitatore di Varco
   (integrato nel motore). Di base è spento; puoi anche impostare un limite unico per tutti i giochi, anche quelli futuri.
 - **Altri negozi**: Epic Games, EA app, Ubisoft Connect e Battle.net si installano con un clic dai loro siti
@@ -61,6 +64,7 @@ CrossOver 26.3, con alcune modifiche proprie (`engine/patches/`):
 | `03-fps-limiter` | Limitatore di fotogrammi per gioco, per tutti i giochi D3DMetal |
 | `04-child-windows-over-opengl` | Mostra le sottofinestre (per esempio il browser della pagina di accesso dell'EA app) sopra le finestre disegnate con OpenGL/Metal, come su Windows (solo per l'EA app) |
 | `05-optional-unwind-outputs` | Accetta puntatori di uscita vuoti nel riavvolgimento dello stack, come Windows (evita un crash all'avvio) |
+| `06-app-bundles-game-mode` | Avvia ogni programma da un suo piccolo pacchetto app dichiarato come gioco (negozi e launcher come strumenti), così macOS può attivare la Modalità Gioco |
 
 Il resto è nel comando `varco` (`cli/varco`), che l'app usa per ogni operazione.
 

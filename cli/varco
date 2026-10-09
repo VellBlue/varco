@@ -107,6 +107,10 @@ load_env() {
     # The windows of the Epic launcher (Unreal) and of the EA app (Qt) draw with Direct3D 11 and stay on D3DMetal:
     # wined3d on the Mac's OpenGL lacks the recent Direct3D 11 shaders they use
     export VARCO_D3DMETAL_EXCLUDE="steam.exe,steamwebhelper.exe,steamservice.exe,gldriverquery.exe,gldriverquery64.exe,vulkandriverquery.exe,vulkandriverquery64.exe,steamerrorreporter.exe,steamerrorreporter64.exe,launcher.exe,launcherpatcher.exe,rockstarservice.exe,socialclubhelper.exe,rockstarerrorhandler.exe,epicwebhelper.exe,eacefsubprocess.exe,qtwebengineprocess.exe,upc.exe,ubisoftconnect.exe,uplaywebcore.exe,battle.net.exe,battle.net launcher.exe,agent.exe"
+    # Every program runs from its own small app bundle: macOS shows its name and turns on Game Mode for games.
+    # These are not games (stores, launchers, browsers, crash reporters): Game Mode puts them behind the game.
+    export VARCO_APP_BUNDLES=1
+    export VARCO_NOT_GAMES="$VARCO_D3DMETAL_EXCLUDE,gameoverlayui.exe,gameoverlayui64.exe,crashpad_handler.exe,playrdr2.exe,eadesktop.exe,eabackgroundservice.exe,ealauncher.exe,epicgameslauncher.exe,galaxyclient.exe,galaxyclient helper.exe,unitycrashhandler32.exe,unitycrashhandler64.exe,crashreportclient.exe,redprelauncher.exe,redlauncher.exe,varco-helper.exe"
     # options added to Steam's browser (VARCO patch in ntdll/unix/env.c)
     export VARCO_WEBHELPER_ARGS=" --no-sandbox --in-process-gpu --disable-gpu"
     # as in Proton: the Rockstar launcher's browser with software ANGLE (no DirectComposition)
