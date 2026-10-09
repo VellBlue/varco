@@ -47,7 +47,7 @@ Usage: varco <command> [arguments]
   app <bottle> <name> steam|game|run [arg...]  Create a .app in ~/Applications/Varco
   set <bottle> <KEY> <value>        Change a setting (e.g. ENGINE gptk, HUD 1)
   dxmode <bottle> <appid> [dx11|dx12]  Show or change a game's DirectX version
-  fps <bottle> <appid>|default [n] Show or change a game's FPS limit (0 = none; default = new games)
+  fps <bottle> <appid>|default|battery [n]  FPS limit of a game, of new games (default) or on battery (0 = none)
   pad <bottle> <appid> [ps|xbox]   Show or change how the game sees the DualSense (PlayStation or Xbox)
   show <bottle>                     Show the settings
   config <bottle>                   Open winecfg
@@ -456,7 +456,8 @@ case "$cmd" in
     touch "$dest"
     echo "Created: $dest" ;;
   fps)
-    # varco fps <bottle> <steam-appid>|default [value] — show or change the FPS limit (0 = no limit).
+    # varco fps <bottle> <steam-appid>|default|battery [value] — show or change the FPS limit (0 = no limit).
+    # "battery": limit for every game while the Mac runs on battery (default 60).
     # Each game uses its best method: the game's own settings (The Witcher 3, Death Stranding) or Varco's
     # limiter in the engine. "default" applies to every game without its own value, new ones included.
     need_bottle "$1"; id="$2"; val="$3"

@@ -1,0 +1,97 @@
+--- a/dlls/winemac.drv/d3dmetal.c
++++ b/dlls/winemac.drv/d3dmetal.c
+@@ -41,7 +41,15 @@
+ /* VARCO: per-game FPS limit, applied in [WineMetalLayer nextDrawable] (d3dmetal_objc.m).
+  * $VARCO_FPS_LIMIT forces a value; otherwise $WINEPREFIX/varco-fps.conf, written by Varco, is read:
+  *   "<game folder in steamapps\common, lowercase>\t<fps>"  or  "*\t<fps>" (default)
++ *   or "@battery\t<fps>": limit while the Mac runs on battery, for every program (see d3dmetal_objc.m)
+  * The default only applies to Steam games (executables inside steamapps\common). 0 = no limit. */
++static int varco_battery_fps;
++
++int varco_fps_battery(void)
++{
++    return varco_battery_fps;
++}
++
+ int varco_fps_limit(void)
+ {
+     static int cached = -1;
+@@ -76,6 +84,7 @@
+         if (!tab) continue;
+         *tab = 0;
+         if (!strcmp(line, "*")) { def = atoi(tab + 1); continue; }
++        if (!strcmp(line, "@battery")) { varco_battery_fps = atoi(tab + 1); continue; }
+         snprintf(needle, sizeof(needle), "\\steamapps\\common\\%s\\", line);
+         if (strstr(image, needle)) found = atoi(tab + 1);
+     }
+--- a/dlls/winemac.drv/d3dmetal_objc.m
++++ b/dlls/winemac.drv/d3dmetal_objc.m
+@@ -35,6 +35,9 @@
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+ #include <mach/mach_time.h>
++#include <notify.h>
++#include <IOKit/ps/IOPowerSources.h>
++#include <IOKit/ps/IOPSKeys.h>
+ #include <time.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -82,6 +85,36 @@
+ }
+ 
+ 
++/* VARCO: YES while the Mac runs on battery. The power source is read again only when macOS announces a change,
++ * so checking it at every frame costs almost nothing. */
++static BOOL varco_on_battery(void)
++{
++    static int token = -1, registered;
++    static BOOL on_battery;
++    int changed = 0;
++
++    if (!registered)
++    {
++        registered = 1;
++        if (notify_register_check(kIOPSNotifyPowerSource, &token) != NOTIFY_STATUS_OK) token = -1;
++        changed = 1;
++    }
++    else if (token != -1 && notify_check(token, &changed) != NOTIFY_STATUS_OK) changed = 0;
++
++    if (changed)
++    {
++        CFTypeRef info = IOPSCopyPowerSourcesInfo();
++        if (info)
++        {
++            CFStringRef type = IOPSGetProvidingPowerSourceType(info);
++            on_battery = type && CFEqual(type, CFSTR(kIOPSBatteryPowerValue));
++            CFRelease(info);
++        }
++    }
++    return on_battery;
++}
++
++
+ @implementation WineMetalLayer
+ 
+     /* Extend [CAMetalLayer nextDrawable] so client_surface_present() can be
+@@ -115,7 +148,9 @@
+         }
+ 
+         {
+-            int fps = varco_fps_limit();
++            int fps = varco_fps_limit(), battery = varco_fps_battery();
++            /* on battery: the lower of the two limits */
++            if (battery > 0 && (fps <= 0 || battery < fps) && varco_on_battery()) fps = battery;
+             if (fps > 0) varco_pace(fps);
+         }
+ 
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -560,6 +560,8 @@
+ extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
+ /* VARCO: per-game FPS limit (0 = no limit), see d3dmetal.c */
+ extern int varco_fps_limit(void);
++/* VARCO: FPS limit while on battery (0 = none), see d3dmetal.c */
++extern int varco_fps_battery(void);
+ /* VARCO: GDI child windows to redraw above the window's OpenGL/Metal surface (see window.c) */
+ extern void macdrv_set_window_child_overlays(macdrv_window w, const CGRect *rects, int count);
+ extern void macdrv_view_release_metal_view(macdrv_metal_view v);

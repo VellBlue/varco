@@ -18,6 +18,8 @@ Un'app gratuita e open source per giocare la tua libreria Steam sui Mac con Appl
   e i controller Bluetooth rispondono più in fretta.
 - **Limite FPS per ogni gioco**: usa l'impostazione del gioco quando c'è, altrimenti il limitatore di Varco
   (integrato nel motore). Di base è spento; puoi anche impostare un limite unico per tutti i giochi, anche quelli futuri.
+- **Risparmio batteria**: a batteria ogni gioco è limitato a 60 FPS (o 30/40), e il limite si attiva e si toglie da
+  solo quando stacchi o ricolleghi l'alimentatore, anche a gioco aperto. Si può disattivare nelle impostazioni.
 - **Altri negozi**: Epic Games, EA app, Ubisoft Connect e Battle.net si installano con un clic dai loro siti
   ufficiali, per i giochi comprati lì e per i giochi Steam che ne richiedono uno. GOG Galaxy non funziona ancora: i
   giochi GOG si installano con gli installer offline dal sito di GOG.
@@ -65,6 +67,7 @@ CrossOver 26.3, con alcune modifiche proprie (`engine/patches/`):
 | `04-child-windows-over-opengl` | Mostra le sottofinestre (per esempio il browser della pagina di accesso dell'EA app) sopra le finestre disegnate con OpenGL/Metal, come su Windows (solo per l'EA app) |
 | `05-optional-unwind-outputs` | Accetta puntatori di uscita vuoti nel riavvolgimento dello stack, come Windows (evita un crash all'avvio) |
 | `06-app-bundles-game-mode` | Avvia ogni programma da un suo piccolo pacchetto app dichiarato come gioco (negozi e launcher come strumenti), così macOS può attivare la Modalità Gioco |
+| `07-battery-fps-limit` | Applica un limite FPS più basso quando il Mac va a batteria, seguendo l'alimentazione mentre cambia |
 
 Il resto è nel comando `varco` (`cli/varco`), che l'app usa per ogni operazione.
 

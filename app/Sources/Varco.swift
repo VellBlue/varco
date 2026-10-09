@@ -1059,6 +1059,8 @@ struct BottleView: View {
     @State private var savedSettings = BottleSettings()
     /// FPS limit of games without their own value, including future downloads (-1 = not read yet)
     @State private var defaultFPS = -1
+    @State private var batteryFPS = -1          // limit on battery: 0 = off
+    @State private var lastBatteryFPS = 60      // value restored when the toggle is turned back on
     @State private var showLog = false
     @State private var launchers: Set<String> = []
     @State private var toTrash: Bottle?
@@ -1092,10 +1094,20 @@ struct BottleView: View {
         }
     }
 
+    /// "varco fps <bottle> battery N": the engine applies it as soon as the Mac goes on battery, even during a game
+    private func setBatteryFPS(_ v: Int) {
+        batteryFPS = v
+        if v > 0 { lastBatteryFPS = v }
+        Task { await store.run(["fps", bottle.name, "battery", String(v)]) }
+    }
+
     private func refresh() {
         reloadContent()
         if bottle.hasSteam {
-            defaultFPS = Int(bottle.gamePrefs()["default.fps"] ?? "0") ?? 0
+            let prefs = bottle.gamePrefs()
+            defaultFPS = Int(prefs["default.fps"] ?? "0") ?? 0
+            batteryFPS = Int(prefs["battery.fps"] ?? "60") ?? 60   // same default as varco-tool
+            if batteryFPS > 0 { lastBatteryFPS = batteryFPS }
         }
         let loaded = bottle.settings()
         savedSettings = loaded      // this first, so onChange doesn't save again
@@ -1258,11 +1270,20 @@ struct BottleView: View {
                         ForEach([30, 40, 60, 120], id: \.self) { Text("\($0) fps").tag($0) }
                     }
                 }
+                if bottle.hasSteam && batteryFPS >= 0 {
+                    Toggle(L("Risparmio batteria: limita gli FPS quando il Mac è a batteria", "Battery saver: limit FPS when the Mac runs on battery"),
+                           isOn: Binding(get: { batteryFPS > 0 }, set: { setBatteryFPS($0 ? lastBatteryFPS : 0) }))
+                    if batteryFPS > 0 {
+                        Picker(L("Limite a batteria", "Limit on battery"), selection: Binding(get: { batteryFPS }, set: { setBatteryFPS($0) })) {
+                            ForEach([30, 40, 60], id: \.self) { Text("\($0) fps").tag($0) }
+                        }
+                    }
+                }
             }
             .formStyle(.grouped)
             .frame(maxWidth: 560)
             .scrollDisabled(true)
-            Text(L("Il limite FPS vale per tutti i giochi che non ne hanno uno proprio, anche quelli che scaricherai: per cambiarlo su un solo gioco, clic destro sulla copertina → Limite FPS.", "The FPS limit applies to every game without its own limit, including the ones you'll download: to change it for one game, right-click its cover → FPS limit."))
+            Text(L("Il limite FPS vale per tutti i giochi che non ne hanno uno proprio, anche quelli che scaricherai: per cambiarlo su un solo gioco, clic destro sulla copertina → Limite FPS. Il risparmio batteria scatta da solo quando stacchi l'alimentatore, anche a gioco aperto, e si toglie quando lo ricolleghi.", "The FPS limit applies to every game without its own limit, including the ones you'll download: to change it for one game, right-click its cover → FPS limit. The battery saver kicks in by itself when you unplug the power adapter, even mid-game, and turns off when you plug it back in."))
                 .font(.callout).foregroundStyle(.secondary)
             Text(EngineChoices.hasWine11 || settings.engine == "wine11"
                  ? L("Le modifiche valgono dal prossimo avvio. Con Wine 11 i giochi che richiedono DirectX 12 non partono: in quel caso usa il motore Varco + D3DMetal.", "Changes apply from the next launch. With Wine 11, games that require DirectX 12 won't start: use the Varco + D3DMetal engine for those.")

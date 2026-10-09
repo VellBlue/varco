@@ -2,6 +2,7 @@
 // scripts/build-app.sh (or: swiftc -O -o cli/tools/varco-tool cli/tools/varco-tool.swift).
 //
 // usage: varco-tool fps <bottle> <steam-appid>|default [value]   show or change (0 = no limit)
+//        varco-tool fps <bottle> battery [value]                 FPS limit on battery (0 = off, default 60)
 //        varco-tool fps <bottle> --write-conf                    regenerate varco-fps.conf (also done at every start)
 //        varco-tool dxmode <bottle> <steam-appid> [dx11|dx12] <0|1 Steam running>
 //        varco-tool pad <bottle> <steam-appid> [ps|xbox]           how the game sees the DualSense
@@ -146,10 +147,15 @@ func writePrefs(_ bottle: String, _ p: Prefs) throws {
 
 // MARK: - FPS limit
 
+/// FPS limit while the Mac runs on battery when the user hasn't chosen one (0 = off)
+let BATTERY_FPS_DEFAULT = 60
+
+func batteryFPS(_ prefs: Prefs) -> Int { toInt(prefs["battery.fps"] ?? String(BATTERY_FPS_DEFAULT)) }
+
 func writeConf(_ bottle: String) throws {
     let prefs = readPrefs(bottle), dirs = installDirs(bottle)
-    var lines = ["*\t\(toInt(prefs["default.fps"] ?? "0"))"]
-    for k in prefs.keys where k.hasSuffix(".fps") && k != "default.fps" {
+    var lines = ["*\t\(toInt(prefs["default.fps"] ?? "0"))", "@battery\t\(batteryFPS(prefs))"]
+    for k in prefs.keys where k.hasSuffix(".fps") && k != "default.fps" && k != "battery.fps" {
         if let d = dirs[String(k.dropLast(4))] { lines.append("\(d.dir.lowercased())\t\(toInt(prefs[k]))") }
     }
     try writeAtomic(join(bottle, "varco-fps.conf"), lines.joined(separator: "\n") + "\n")
@@ -206,10 +212,22 @@ func rdr2FullRefresh(_ bottle: String) throws {
 }
 
 func fps(_ a: [String]) throws {
-    guard a.count >= 2 else { fail("usage: varco-tool fps <bottle> <steam-appid>|default|--write-conf [value]") }
+    guard a.count >= 2 else { fail("usage: varco-tool fps <bottle> <steam-appid>|default|battery|--write-conf [value]") }
     let bottle = a[0], appid = a[1], val = a.count > 2 ? a[2] : ""
     if appid == "--write-conf" { try writeConf(bottle); return }
     var prefs = readPrefs(bottle)
+    if appid == "battery" {
+        // limit for every game while the Mac runs on battery (the engine switches it on and off as the power changes)
+        if !val.isEmpty {
+            guard let v = Int(val), v >= 0 else { fail("Invalid value: \(val)") }
+            prefs["battery.fps"] = String(v)
+            try writePrefs(bottle, prefs); try writeConf(bottle)
+            print(v != 0 ? "Battery FPS limit: \(v)" : "No battery FPS limit")
+        } else {
+            print(batteryFPS(prefs))
+        }
+        return
+    }
     if appid == "default" {
         if !val.isEmpty {
             guard let v = Int(val) else { fail("Invalid value: \(val)") }
