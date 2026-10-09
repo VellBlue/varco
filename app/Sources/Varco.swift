@@ -22,13 +22,13 @@ let cliPath: String = Bundle.main.path(forResource: "varco", ofType: nil, inDire
 /// engine/package-*.sh) and size: scripts/build-app.sh warns if they don't match the packages in ../varco-release.
 enum VarcoRelease {
     /// App version (scripts/build-app.sh copies it into Info.plist; Release tags are "v" + version)
-    static let appVersion = "1.0.2"
+    static let appVersion = "1.0.3"
     static let repo = URL(string: "https://github.com/VellBlue/varco")!
     static let latestAPI = URL(string: "https://api.github.com/repos/VellBlue/varco/releases/latest")!
     static let newIssue = URL(string: "https://github.com/VellBlue/varco/issues/new/choose")!
-    static let engineVersion = "26.3-2"
-    static let engineURL = URL(string: "https://github.com/VellBlue/varco/releases/download/v1.0.1/varco-engine-26.3-2.tar.xz")!
-    static let engineSHA256 = "8cad1f93a251abb3ff7de357d77a0edade7509bbb51839712d904a6e1bb9f362"
+    static let engineVersion = "26.3-3"
+    static let engineURL = URL(string: "https://github.com/VellBlue/varco/releases/download/v1.0.3/varco-engine-26.3-3.tar.xz")!
+    static let engineSHA256 = "fa8a6e8557f0aed2fe8394f2117ae9ad81be2fb652e19cbbdfac4c2deafab92b"
     static let engineSize = "129 MB"
     static let d3dmetalURL = URL(string: "https://github.com/VellBlue/varco/releases/download/v1.0/varco-d3dmetal-gptk3.0.tar.xz")!
     static let d3dmetalSHA256 = "d36e9c7671c2bac980a0e532e52df1cfd125a8327fddc008b07609121d6cb1ef"

@@ -7,7 +7,7 @@
 set -e
 SRC="${1:-$HOME/Varco/engines/cx26}"
 OUT="${2:-$HOME/Developer/varco-release}"
-VER="${3:-26.3-2}"
+VER="${3:-26.3-3}"
 REPO="${0:A:h:h}"
 WINE_SRC="${WINE_SRC:-$HOME/Varco/build/sources/wine}"
 
