@@ -2,7 +2,9 @@
  * When a game window appears, it minimizes Steam's main window. It also confirms the "graphics driver too old"
  * warnings that games show at startup (D3DMetal reports a GPU with a driver version they don't know): the game
  * waits for OK and then runs normally. Only message boxes of games that talk about the driver and offer nothing
- * but OK are confirmed: the helper never answers a question for the user. */
+ * but OK are confirmed: the helper never answers a question for the user. Game windows as large as the screen but
+ * moved away from it are put back in place. */
+#define _WIN32_WINNT 0x0A00
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wchar.h>
@@ -79,6 +81,21 @@ static BOOL CALLBACK confirm_warning(HWND h, LPARAM l)
     return TRUE;
 }
 
+/* a game window exactly as large as its screen but moved away from it goes back to the screen's corner: with an
+ * emulated lower resolution (Boost), some games center their window using the desktop size they read at startup */
+static BOOL CALLBACK snap_fullscreen(HWND h, LPARAM l)
+{
+    RECT r; MONITORINFO mi = { sizeof(mi) }; DWORD pid; WCHAR name[128];
+    if (!IsWindowVisible(h) || IsIconic(h) || GetWindow(h, GW_OWNER)) return TRUE;
+    if (!GetWindowRect(h, &r) || !GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) return TRUE;
+    if (r.right - r.left != mi.rcMonitor.right - mi.rcMonitor.left || r.bottom - r.top != mi.rcMonitor.bottom - mi.rcMonitor.top) return TRUE;
+    if (r.left == mi.rcMonitor.left && r.top == mi.rcMonitor.top) return TRUE;
+    GetWindowThreadProcessId(h, &pid);
+    if (!exe_name(pid, name, 128) || is_ignored(name)) return TRUE;
+    SetWindowPos(h, NULL, mi.rcMonitor.left, mi.rcMonitor.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    return TRUE;
+}
+
 static BOOL CALLBACK minimize_steam(HWND h, LPARAM l)
 {
     DWORD pid; WCHAR name[128], cls[64];
@@ -95,11 +112,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
     HANDLE m = CreateMutexW(NULL, TRUE, L"VarcoSteamHelper");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
     BOOL was_playing = FALSE; int idle = 0;
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);   /* real window and screen sizes */
     for (;;) {
         Sleep(1500);
         if (!steam_running()) { if (++idle > 40) break; continue; }   /* quits ~1 minute after Steam closes */
         idle = 0;
         EnumWindows(confirm_warning, 0);
+        EnumWindows(snap_fullscreen, 0);
         game_found = FALSE; EnumWindows(find_game, 0);
         if (game_found && !was_playing) { Sleep(1500); EnumWindows(minimize_steam, 0); }
         was_playing = game_found;

@@ -64,6 +64,7 @@ CrossOver 26.3, with a few patches of its own (`engine/patches/`):
 | `05-optional-unwind-outputs` | Lets games pass empty output pointers to the stack unwinder, as Windows does (prevents a crash at startup) |
 | `06-app-bundles-game-mode` | Runs each program from its own small app bundle, declared as a game (stores and launchers as tools), so macOS can turn on Game Mode |
 | `07-battery-fps-limit` | Applies a lower FPS limit while the Mac runs on battery, following the power source as it changes |
+| `08-metalfx-boost` | Experimental, off by default (`VARCO_BOOST=1`): when a game renders below its window's resolution, enlarges the image with MetalFX instead of the compositor's blurry scaling |
 
 Everything else lives in the `varco` command-line tool (`cli/varco`), which the app calls.
 

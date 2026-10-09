@@ -1,0 +1,261 @@
+--- a/dlls/winemac.drv/d3dmetal_objc.m
++++ b/dlls/winemac.drv/d3dmetal_objc.m
+@@ -38,6 +38,10 @@
+ #include <notify.h>
+ #include <IOKit/ps/IOPowerSources.h>
+ #include <IOKit/ps/IOPSKeys.h>
++#import <MetalFX/MetalFX.h>
++#import <objc/message.h>
++#include <dlfcn.h>
++#include <stdatomic.h>
+ #include <time.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -114,9 +118,216 @@
+     return on_battery;
+ }
+ 
++/* VARCO BOOST: when a game draws at a lower resolution than its window has on screen (a DPI-unaware game in a
++ * 200% bottle, or a game set to a lower resolution), macOS stretches the image with a blurry filter. With Boost
++ * ($VARCO_BOOST=1) Varco gives D3DMetal a texture of the game's size and enlarges it to the screen's resolution
++ * with MetalFX: the game renders a quarter of the pixels and stays sharp.
++ * Order on the GPU: every command buffer the process commits signals varco_event, and the enlargement waits for
++ * the last value signalled before the game asked to present the frame. If anything is missing, the layer behaves
++ * exactly as before. */
++static int varco_boost_debug;
+ 
++static BOOL varco_boost_enabled(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        const char *env = getenv("VARCO_BOOST");
++        on = env && atoi(env) > 0 && dlopen("/System/Library/Frameworks/MetalFX.framework/MetalFX", RTLD_NOW)
++             && NSClassFromString(@"MTLFXSpatialScalerDescriptor");
++        varco_boost_debug = getenv("VARCO_BOOST_DEBUG") != NULL;
++        if (varco_boost_debug) fprintf(stderr, "VARCO BOOST: %s\n", on ? "on" : "off");
++    }
++    return on;
++}
++
++static id<MTLSharedEvent> varco_event;
++static _Atomic uint64_t varco_event_value;
++static IMP varco_orig_commit;
++static __thread int varco_own_commit;
++
++static void varco_commit(id self, SEL sel)
++{
++    if (!varco_own_commit && varco_event)
++        [(id<MTLCommandBuffer>)self encodeSignalEvent:varco_event value:atomic_fetch_add(&varco_event_value, 1) + 1];
++    ((void (*)(id, SEL))varco_orig_commit)(self, sel);
++}
++
++/* the state of one layer, kept as an associated object: WineMetalLayer keeps its original layout */
++@interface VarcoBoostState : NSObject
++{
++@public
++    CGSize virtualSize;        /* the size D3DMetal asked for */
++    BOOL active;               /* the drawable is larger than virtualSize and MetalFX enlarges */
++    id<MTLCommandQueue> queue;
++    id<MTLFXSpatialScaler> scaler;
++    id<MTLTexture> low[3];
++    unsigned int next;
++    BOOL failed;
++}
++@end
++
++@implementation VarcoBoostState
++- (void) dealloc
++{
++    int i;
++    [queue release];
++    [scaler release];
++    for (i = 0; i < 3; i++) [low[i] release];
++    [super dealloc];
++}
++@end
++
++static char varco_boost_key;
++
++/* what D3DMetal gets instead of the drawable: its texture is the low-resolution one; presenting it enlarges
++ * that texture into the real drawable and then presents the real drawable, with the same call */
++@interface VarcoBoostDrawable : NSProxy
++{
++@public
++    id<CAMetalDrawable> real;
++    id<MTLTexture> low;
++    VarcoBoostState *state;
++}
++@end
++
++@implementation VarcoBoostDrawable
++- (void) dealloc { [(id)real release]; [low release]; [state release]; [super dealloc]; }
++- (id<MTLTexture>) texture { return low; }
++- (BOOL) respondsToSelector:(SEL)sel { return [(id)real respondsToSelector:sel]; }
++- (NSMethodSignature*) methodSignatureForSelector:(SEL)sel { return [(id)real methodSignatureForSelector:sel]; }
++- (void) forwardInvocation:(NSInvocation*)inv
++{
++    const char *name = sel_getName([inv selector]);
++    if (!strncmp(name, "present", 7))
++    {
++        id<MTLCommandBuffer> cb;
++        [inv setTarget:(id)real];
++        [inv retainArguments];
++        @synchronized(state)
++        {
++            cb = [state->queue commandBuffer];
++            [cb encodeWaitForEvent:varco_event value:atomic_load(&varco_event_value)];
++            state->scaler.colorTexture = low;
++            state->scaler.outputTexture = real.texture;
++            state->scaler.inputContentWidth = low.width;
++            state->scaler.inputContentHeight = low.height;
++            [state->scaler encodeToCommandBuffer:cb];
++        }
++        [cb addScheduledHandler:^(id<MTLCommandBuffer> b) { [inv invoke]; }];
++        varco_own_commit = 1;
++        [cb commit];
++        varco_own_commit = 0;
++        return;
++    }
++    [inv invokeWithTarget:(id)real];
++}
++@end
++
++
+ @implementation WineMetalLayer
+ 
++    /* VARCO BOOST: the state of this layer, created only when Boost is on */
++    - (VarcoBoostState*) varcoBoostState
++    {
++        VarcoBoostState *st = objc_getAssociatedObject(self, &varco_boost_key);
++        if (!st && varco_boost_enabled())
++        {
++            st = [[VarcoBoostState alloc] init];
++            st->virtualSize = [super drawableSize];
++            objc_setAssociatedObject(self, &varco_boost_key, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++            [st release];
++        }
++        return st;
++    }
++
++    /* the real drawable size: virtualSize, or the layer's size on screen (at most twice virtualSize) */
++    - (void) varcoBoostUpdate:(VarcoBoostState*)st
++    {
++        CGFloat scale = self.contentsScale;
++        CGSize screen = CGSizeMake(round(self.bounds.size.width * scale), round(self.bounds.size.height * scale));
++        CGSize out = st->virtualSize;
++        BOOL active = NO;
++
++        if (!st->failed && st->virtualSize.width >= 16 && st->virtualSize.height >= 16 &&
++            screen.width > st->virtualSize.width * 1.05 && screen.height > st->virtualSize.height * 1.05)
++        {
++            out = CGSizeMake(MIN(screen.width, st->virtualSize.width * 2), MIN(screen.height, st->virtualSize.height * 2));
++            active = YES;
++        }
++        if (!CGSizeEqualToSize([super drawableSize], out)) [super setDrawableSize:out];
++        if (active && self.framebufferOnly) self.framebufferOnly = NO;
++        if (active != st->active && varco_boost_debug)
++            fprintf(stderr, "VARCO BOOST: %s %.0fx%.0f -> %.0fx%.0f\n", active ? "enlarging" : "off",
++                    st->virtualSize.width, st->virtualSize.height, out.width, out.height);
++        st->active = active;
++    }
++
++    - (void) setDrawableSize:(CGSize)size
++    {
++        VarcoBoostState *st = [self varcoBoostState];
++        if (!st) { [super setDrawableSize:size]; return; }
++        st->virtualSize = size;
++        [self varcoBoostUpdate:st];
++    }
++
++    - (CGSize) drawableSize
++    {
++        VarcoBoostState *st = objc_getAssociatedObject(self, &varco_boost_key);
++        return st ? st->virtualSize : [super drawableSize];
++    }
++
++    /* the low-resolution texture and the MetalFX scaler for the current sizes; NO if they can't be made */
++    - (BOOL) varcoBoostPrepare:(VarcoBoostState*)st real:(id<CAMetalDrawable>)real
++    {
++        id<MTLTexture> out = real.texture;
++        NSUInteger w = st->virtualSize.width, h = st->virtualSize.height;
++        id<MTLTexture> low = st->low[st->next % 3];
++        int i;
++
++        if (!st->queue)
++        {
++            static dispatch_once_t once;
++            id<MTLDevice> device = out.device;
++            dispatch_once(&once, ^{
++                id<MTLCommandQueue> q = [device newCommandQueue];
++                Method m = class_getInstanceMethod(object_getClass([q commandBuffer]), @selector(commit));
++                varco_event = [device newSharedEvent];
++                if (m) varco_orig_commit = method_setImplementation(m, (IMP)varco_commit);
++                [q release];
++            });
++            if (!varco_orig_commit) return NO;
++            st->queue = [device newCommandQueue];
++        }
++        if (!st->scaler || st->scaler.inputWidth != w || st->scaler.inputHeight != h ||
++            st->scaler.outputWidth != out.width || st->scaler.outputHeight != out.height ||
++            st->scaler.colorTextureFormat != out.pixelFormat)
++        {
++            MTLFXSpatialScalerDescriptor *desc = [[NSClassFromString(@"MTLFXSpatialScalerDescriptor") alloc] init];
++            desc.inputWidth = w; desc.inputHeight = h;
++            desc.outputWidth = out.width; desc.outputHeight = out.height;
++            desc.colorTextureFormat = desc.outputTextureFormat = out.pixelFormat;
++            desc.colorProcessingMode = (out.pixelFormat == MTLPixelFormatRGBA16Float) ?
++                MTLFXSpatialScalerColorProcessingModeHDR : MTLFXSpatialScalerColorProcessingModePerceptual;
++            [st->scaler release];
++            st->scaler = [desc newSpatialScalerWithDevice:out.device];
++            [desc release];
++            for (i = 0; i < 3; i++) { [st->low[i] release]; st->low[i] = nil; }
++            if (!st->scaler || (out.usage & st->scaler.outputTextureUsage) != st->scaler.outputTextureUsage) return NO;
++            low = nil;
++        }
++        if (!low || low.width != w || low.height != h || low.pixelFormat != out.pixelFormat)
++        {
++            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out.pixelFormat
++                                                                                         width:w height:h mipmapped:NO];
++            td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | st->scaler.colorTextureUsage;
++            td.storageMode = MTLStorageModePrivate;
++            [st->low[st->next % 3] release];
++            st->low[st->next % 3] = [out.device newTextureWithDescriptor:td];
++        }
++        return st->low[st->next % 3] != nil;
++    }
++
+     /* Extend [CAMetalLayer nextDrawable] so client_surface_present() can be
+      * called for the corresponding client_surface.
+      */
+@@ -154,7 +365,29 @@
+             if (fps > 0) varco_pace(fps);
+         }
+ 
+-        return [super nextDrawable];
++        {
++            VarcoBoostState *st = objc_getAssociatedObject(self, &varco_boost_key);
++            id<CAMetalDrawable> d;
++
++            if (st) [self varcoBoostUpdate:st];
++            d = [super nextDrawable];
++            if (st && st->active && d)
++            {
++                if ([self varcoBoostPrepare:st real:d])
++                {
++                    VarcoBoostDrawable *proxy = [VarcoBoostDrawable alloc];
++                    proxy->real = [d retain];
++                    proxy->low = [st->low[st->next++ % 3] retain];
++                    proxy->state = [st retain];
++                    return (id<CAMetalDrawable>)[proxy autorelease];
++                }
++                /* MetalFX not usable here: the layer goes back to the game's size, stretched by macOS */
++                st->failed = YES;
++                if (varco_boost_debug) fprintf(stderr, "VARCO BOOST: MetalFX not usable, off\n");
++                [self varcoBoostUpdate:st];
++            }
++            return d;
++        }
+     }
+ 
+ @end
