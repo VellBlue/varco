@@ -68,6 +68,7 @@ CrossOver 26.3, with a few patches of its own (`engine/patches/`):
 | `06-app-bundles-game-mode` | Runs each program from its own small app bundle, declared as a game (stores and launchers as tools), so macOS can turn on Game Mode |
 | `07-battery-fps-limit` | Applies a lower FPS limit while the Mac runs on battery, following the power source as it changes |
 | `08-metalfx-boost` | Varco Boost: a game in fullscreen at a lower resolution renders at that size (the Mac's display never changes) and is enlarged to the screen with MetalFX; its window is shown at the screen's corner even when D3DMetal places it off-center |
+| `09-msync-warn-once` | Warns once when msync's wait-list pool runs out, instead of at every allocation: some games (Tiebreak) wrote millions of lines and fell from ~86 to ~30 fps |
 
 Everything else lives in the `varco` command-line tool (`cli/varco`), which the app calls.
 

@@ -1,0 +1,14 @@
+--- a/server/msync.c
++++ b/server/msync.c
+@@ -177,7 +177,10 @@
+ {
+     if (pool->count == 0)
+     {
+-        fprintf( stderr, "msync: warn: node memory pool exhausted\n" );
++        /* VARCO: once. Some games (Tiebreak) exhaust the pool for good: a line at every allocation from then on
++         * meant millions of writes from the server thread, which slowed every program of the bottle. */
++        static int warned;
++        if (!warned++) fprintf( stderr, "msync: warn: node memory pool exhausted\n" );
+         return malloc( sizeof(struct tid_node) );
+     }
+     return pool->free_nodes[--pool->count];
